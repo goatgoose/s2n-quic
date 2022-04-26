@@ -60,6 +60,22 @@ impl<N: Network> Executor<N> {
     pub fn run(&mut self) {
         self.executor.block_on_primary();
     }
+
+    pub fn close(&mut self) {
+        let buffers = &self.handle.buffers;
+        // first close all of the buffers, which notifies all of the tasks of a network error
+        self.executor.environment().close(|| buffers.close());
+        while self.executor.macrostep() > 0 {}
+
+        // then close the actual executor
+        self.executor.close()
+    }
+}
+
+impl<N: Network> Drop for Executor<N> {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 struct Env<N> {
@@ -74,6 +90,20 @@ struct Env<N> {
 impl<N> Env<N> {
     fn enter<F: FnOnce() -> O, O>(&self, f: F) -> O {
         self.handle.enter(|| self.time.enter(|| self.rand.enter(f)))
+    }
+
+    fn close<F: FnOnce()>(&mut self, f: F) {
+        let handle = &mut self.handle;
+        let rand = &mut self.rand;
+        let time = &mut self.time;
+        handle.enter(|| {
+            rand.enter(|| {
+                time.close();
+                time.enter(|| {
+                    f();
+                });
+            })
+        })
     }
 }
 
@@ -137,6 +167,25 @@ impl<N: Network> bach::executor::Environment for Env<N> {
                 break;
             }
         }
+    }
+
+    fn close<F>(&mut self, close: F)
+    where
+        F: 'static + FnOnce() + Send,
+    {
+        let Self {
+            handle, time, rand, ..
+        } = self;
+
+        handle.enter(|| {
+            rand.enter(|| {
+                time.enter(|| {
+                    close();
+                });
+
+                time.close();
+            })
+        });
     }
 }
 
