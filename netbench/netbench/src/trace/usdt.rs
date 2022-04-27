@@ -22,6 +22,7 @@ impl Trace for Usdt {
     #[inline(never)]
     fn send(&mut self, _now: Timestamp, stream_id: u64, len: u64) {
         probe!(netbench, netbench__send, self.connection_id, stream_id, len);
+        println!("probe: @s {} {} {}", self.connection_id, stream_id, len);
     }
 
     #[inline(never)]
@@ -43,6 +44,7 @@ impl Trace for Usdt {
             stream_id,
             len
         );
+        println!("probe: @r {} {} {}", self.connection_id, stream_id, len);
     }
 
     #[inline(never)]

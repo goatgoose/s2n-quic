@@ -73,26 +73,32 @@ impl Report {
         stat!("d", deallocs);
         stat!("S", syscalls);
 
-        macro_rules! try_map {
-            ($prefix:literal, $on_value:expr) => {
+        macro_rules! stream_stat {
+            ($prefix:literal, $name:ident) => {
                 if let Some(line) = line.strip_prefix(concat!("@", $prefix, "[")) {
-                    let mut on_value = $on_value;
                     let (id, line) = line.split_once("]: ").unwrap();
                     let (conn, id) = id.split_once(", ").unwrap();
                     let connection_id = conn.parse().unwrap();
                     let id = id.parse().unwrap();
                     let id = StreamId { connection_id, id };
                     let value = BpfParse::parse(line).unwrap();
-                    on_value(id, value);
+                    self.$name.insert(id, value);
+                    return;
+                } else if let Some(line) = line.strip_prefix(concat!("probe: @", $prefix, " ")) {
+                    let split: Vec<&str> = line.split(" ").collect();
+                    let connection_id = split[0].parse().unwrap();
+                    let id = split[1].parse().unwrap();
+                    let len: u64 = split[2].parse().unwrap();
+
+                    let stream_id = StreamId { connection_id, id };
+                    if !self.$name.contains_key(&stream_id) {
+                        self.$name.insert(stream_id, Stat { count: 0, total: 0 });
+                    }
+                    let current_stat = self.$name.get(&stream_id).unwrap();
+                    self.$name.insert(stream_id, Stat { count: current_stat.count + 1, total: current_stat.total + len });
                     return;
                 }
-            };
-        }
-
-        macro_rules! stream_stat {
-            ($prefix:literal, $name:ident) => {
-                try_map!($prefix, |id, value| self.$name.insert(id, value));
-            };
+            }
         }
 
         stream_stat!("s", send);
@@ -217,6 +223,8 @@ pub fn try_run(args: &crate::Args) -> Result<Option<()>> {
         )?
     };
 
+    eprintln!("detect hardware events: {}", detect_hardware_events()?);
+
     command
         .arg("-c")
         .arg(driver)
@@ -289,7 +297,7 @@ fn detect_hardware_events() -> Result<bool> {
     let out = Command::new("perf").arg("list").arg("hw").output()?;
     let out = core::str::from_utf8(&out.stdout)?;
 
-    if out.contains("cycles") && out.contains("branches") && out.contains("instructions") {
+    if out.to_string().contains("cycles") && out.to_string().contains("instructions") {
         return Ok(true);
     }
 
