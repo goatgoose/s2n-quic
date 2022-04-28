@@ -95,8 +95,36 @@ impl Report {
             };
         }
 
-        stream_stat!("s", send);
-        stream_stat!("r", receive);
+        macro_rules! stream_stat2 {
+            ($prefix:literal, $name:ident) => {
+                if let Some(line) = line.strip_prefix(concat!("@", $prefix, "[")) {
+                    let (id, line) = line.split_once("]: ").unwrap();
+                    let (conn, id) = id.split_once(", ").unwrap();
+                    let connection_id = conn.parse().unwrap();
+                    let id = id.parse().unwrap();
+                    let id = StreamId { connection_id, id };
+                    let value = BpfParse::parse(line).unwrap();
+                    self.$name.insert(id, value);
+                    return;
+                } else if let Some(line) = line.strip_prefix(concat!("probe: @", $prefix, " ")) {
+                    let split: Vec<&str> = line.split(" ").collect();
+                    let connection_id = split[0].parse().unwrap();
+                    let id = split[1].parse().unwrap();
+                    let len: u64 = split[2].parse().unwrap();
+
+                    let stream_id = StreamId { connection_id, id };
+                    if !self.$name.contains_key(&stream_id) {
+                        self.$name.insert(stream_id, Stat { count: 0, total: 0 });
+                    }
+                    let current_stat = self.$name.get(&stream_id).unwrap();
+                    self.$name.insert(stream_id, Stat { count: current_stat.count + 1, total: current_stat.total + len });
+                    return;
+                }
+            }
+        }
+
+        stream_stat2!("s", send);
+        stream_stat2!("r", receive);
 
         if let Some(pid) = line.strip_prefix("cpid=") {
             let pid = pid.parse().unwrap();
@@ -244,7 +272,7 @@ pub fn try_run(args: &crate::Args) -> Result<Option<()>> {
         let mut report = Report::new(interval);
         for line in output.lines() {
             if let Ok(line) = line {
-                eprintln!("{}", line);
+                //eprintln!("{}", line);
                 report.push(&line);
             } else {
                 break;
