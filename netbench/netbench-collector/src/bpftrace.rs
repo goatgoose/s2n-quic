@@ -73,29 +73,7 @@ impl Report {
         stat!("d", deallocs);
         stat!("S", syscalls);
 
-        macro_rules! try_map {
-            ($prefix:literal, $on_value:expr) => {
-                if let Some(line) = line.strip_prefix(concat!("@", $prefix, "[")) {
-                    let mut on_value = $on_value;
-                    let (id, line) = line.split_once("]: ").unwrap();
-                    let (conn, id) = id.split_once(", ").unwrap();
-                    let connection_id = conn.parse().unwrap();
-                    let id = id.parse().unwrap();
-                    let id = StreamId { connection_id, id };
-                    let value = BpfParse::parse(line).unwrap();
-                    on_value(id, value);
-                    return;
-                }
-            };
-        }
-
         macro_rules! stream_stat {
-            ($prefix:literal, $name:ident) => {
-                try_map!($prefix, |id, value| self.$name.insert(id, value));
-            };
-        }
-
-        macro_rules! stream_stat2 {
             ($prefix:literal, $name:ident) => {
                 if let Some(line) = line.strip_prefix(concat!("@", $prefix, "[")) {
                     let (id, line) = line.split_once("]: ").unwrap();
@@ -123,8 +101,8 @@ impl Report {
             }
         }
 
-        stream_stat2!("s", send);
-        stream_stat2!("r", receive);
+        stream_stat!("s", send);
+        stream_stat!("r", receive);
 
         if let Some(pid) = line.strip_prefix("cpid=") {
             let pid = pid.parse().unwrap();
@@ -272,7 +250,6 @@ pub fn try_run(args: &crate::Args) -> Result<Option<()>> {
         let mut report = Report::new(interval);
         for line in output.lines() {
             if let Ok(line) = line {
-                //eprintln!("{}", line);
                 report.push(&line);
             } else {
                 break;
