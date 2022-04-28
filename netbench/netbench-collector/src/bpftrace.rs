@@ -217,6 +217,8 @@ pub fn try_run(args: &crate::Args) -> Result<Option<()>> {
         )?
     };
 
+    eprintln!("detect hardware events: {}", detect_hardware_events()?);
+
     command
         .arg("-c")
         .arg(driver)
@@ -242,6 +244,7 @@ pub fn try_run(args: &crate::Args) -> Result<Option<()>> {
         let mut report = Report::new(interval);
         for line in output.lines() {
             if let Ok(line) = line {
+                eprintln!("{}", line);
                 report.push(&line);
             } else {
                 break;
@@ -289,7 +292,7 @@ fn detect_hardware_events() -> Result<bool> {
     let out = Command::new("perf").arg("list").arg("hw").output()?;
     let out = core::str::from_utf8(&out.stdout)?;
 
-    if out.contains("cycles") && out.contains("branches") && out.contains("instructions") {
+    if out.to_string().contains("cycles") && out.to_string().contains("instructions") {
         return Ok(true);
     }
 

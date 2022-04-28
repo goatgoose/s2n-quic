@@ -31,12 +31,6 @@ hardware:instructions
 {
   @i=count();
 }
-
-hardware:branches
-/pid==cpid/
-{
-  @b=count();
-}
 {{/if}}
 
 software:cs
@@ -57,7 +51,6 @@ i:ms:{{interval_ms}} {
 {{#if hardware}}
   print(@c);
   print(@i);
-  print(@b);
 {{/if}}
   print(@C);
   print(@S);
