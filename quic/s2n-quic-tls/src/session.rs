@@ -12,9 +12,9 @@ use s2n_quic_core::{
 use s2n_quic_crypto::Suite;
 use s2n_tls::raw::{
     config::Config,
-    connection::Connection,
+    connection::{Connection, Mode},
     error::Error,
-    ffi::{s2n_blinding, s2n_mode},
+    ffi::s2n_blinding,
 };
 
 #[derive(Debug)]
@@ -37,8 +37,8 @@ impl Session {
         server_name: Option<ServerName>,
     ) -> Result<Self, Error> {
         let mut connection = Connection::new(match endpoint {
-            endpoint::Type::Server => s2n_mode::SERVER,
-            endpoint::Type::Client => s2n_mode::CLIENT,
+            endpoint::Type::Server => Mode::Server,
+            endpoint::Type::Client => Mode::Client,
         });
 
         connection.set_config(config)?;
