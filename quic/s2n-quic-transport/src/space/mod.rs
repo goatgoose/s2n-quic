@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    ack, connection, endpoint, path,
+    ack,
+    ack::AckManager,
+    connection, endpoint, path,
     path::{path_event, Path},
     processed_packet::ProcessedPacket,
-    space::rx_packet_numbers::AckManager,
     transmission,
 };
 use bytes::Bytes;
@@ -33,11 +34,11 @@ use s2n_quic_core::{
 
 mod application;
 mod crypto_stream;
+pub(crate) mod datagram;
 mod handshake;
 mod handshake_status;
 mod initial;
 mod keep_alive;
-pub(crate) mod rx_packet_numbers;
 mod session_context;
 mod tx_packet_numbers;
 
@@ -193,6 +194,7 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
         self.zero_rtt_crypto = None;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn poll_crypto<Pub: event::ConnectionPublisher>(
         &mut self,
         path_manager: &mut path::Manager<Config>,
@@ -201,6 +203,7 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
         now: Timestamp,
         waker: &Waker,
         publisher: &mut Pub,
+        datagram: &mut Config::DatagramEndpoint,
     ) -> Poll<Result<(), transport::Error>> {
         if let Some(session_info) = self.session_info.as_mut() {
             let mut context: SessionContext<Config, Pub> = SessionContext {
@@ -219,6 +222,7 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
                 application_protocol: &mut self.application_protocol,
                 waker,
                 publisher,
+                datagram,
             };
 
             match session_info.session.poll(&mut context)? {
