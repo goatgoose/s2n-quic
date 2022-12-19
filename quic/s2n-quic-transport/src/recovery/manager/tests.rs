@@ -69,7 +69,7 @@ fn one_second_pto_when_no_previous_rtt_available() {
     );
 }
 
-//= https://www.rfc-editor.org/rfc/rfc9002#section-A.5
+//= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.5
 //= type=test
 #[test]
 fn on_packet_sent() {
@@ -103,6 +103,7 @@ fn on_packet_sent() {
         } else {
             AckElicitation::NonEliciting
         };
+        let app_limited = if i % 2 == 0 { Some(true) } else { Some(false) };
 
         let outcome = transmission::Outcome {
             ack_elicitation,
@@ -116,6 +117,8 @@ fn on_packet_sent() {
             outcome,
             time_sent,
             ecn,
+            transmission::Mode::Normal,
+            app_limited,
             &mut context,
             &mut publisher,
         );
@@ -128,6 +131,10 @@ fn on_packet_sent() {
         );
         assert_eq!(actual_sent_packet.time_sent, time_sent);
         assert_eq!(actual_sent_packet.ecn, ecn);
+        assert_eq!(
+            app_limited,
+            context.path().congestion_controller.app_limited
+        );
 
         if outcome.is_congestion_controlled {
             assert_eq!(actual_sent_packet.sent_bytes as usize, outcome.bytes_sent);
@@ -247,6 +254,8 @@ fn on_packet_sent_across_multiple_paths() {
         outcome,
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -292,6 +301,8 @@ fn on_packet_sent_across_multiple_paths() {
         outcome,
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -317,7 +328,7 @@ fn on_packet_sent_across_multiple_paths() {
     assert_eq!(Some(expected_pto), manager.pto.timer.next_expiration());
 }
 
-//= https://www.rfc-editor.org/rfc/rfc9002#section-A.7
+//= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.7
 //= type=test
 #[test]
 fn on_ack_frame() {
@@ -346,6 +357,8 @@ fn on_ack_frame() {
             },
             time_sent,
             ecn,
+            transmission::Mode::Normal,
+            None,
             &mut context,
             &mut publisher,
         );
@@ -484,6 +497,8 @@ fn on_ack_frame() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -553,6 +568,8 @@ fn process_new_acked_packets_update_pto_timer() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -568,6 +585,8 @@ fn process_new_acked_packets_update_pto_timer() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -666,6 +685,8 @@ fn process_new_acked_packets_congestion_controller() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -681,6 +702,8 @@ fn process_new_acked_packets_congestion_controller() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -790,6 +813,8 @@ fn process_new_acked_packets_pto_timer() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -805,6 +830,8 @@ fn process_new_acked_packets_pto_timer() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -840,6 +867,8 @@ fn process_new_acked_packets_pto_timer() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -902,6 +931,8 @@ fn process_new_acked_packets_process_ecn() {
             },
             time_sent,
             ExplicitCongestionNotification::Ect0,
+            transmission::Mode::Normal,
+            None,
             &mut context,
             &mut publisher,
         );
@@ -1002,6 +1033,8 @@ fn process_new_acked_packets_failed_ecn_validation_does_not_cause_congestion_eve
             },
             time_sent,
             ExplicitCongestionNotification::Ect0,
+            transmission::Mode::Normal,
+            None,
             &mut context,
             &mut publisher,
         );
@@ -1058,6 +1091,8 @@ fn no_rtt_update_when_not_acknowledging_the_largest_acknowledged_packet() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1071,6 +1106,8 @@ fn no_rtt_update_when_not_acknowledging_the_largest_acknowledged_packet() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1147,6 +1184,8 @@ fn no_rtt_update_when_receiving_packet_on_different_path() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1160,6 +1199,8 @@ fn no_rtt_update_when_receiving_packet_on_different_path() {
         },
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1168,7 +1209,7 @@ fn no_rtt_update_when_receiving_packet_on_different_path() {
     // clear the cc counts
     context.path_mut().congestion_controller.on_rtt_update = 0;
 
-    // Ack packet 0 on diffent path as it was sent.. expect no rtt update
+    // Ack packet 0 on different path as it was sent.. expect no rtt update
     let ack_receive_time = time_sent + Duration::from_millis(500);
     helper_ack_packets_on_path(
         0..=0,
@@ -1261,6 +1302,8 @@ fn rtt_update_when_receiving_ack_from_multiple_paths() {
         },
         sent_time,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1277,6 +1320,8 @@ fn rtt_update_when_receiving_ack_from_multiple_paths() {
         },
         sent_time,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1320,7 +1365,7 @@ fn rtt_update_when_receiving_ack_from_multiple_paths() {
     assert_eq!(second_path.congestion_controller.on_rtt_update, 0);
 }
 
-//= https://www.rfc-editor.org/rfc/rfc9002#section-A.10
+//= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.10
 //= type=test
 #[test]
 fn detect_and_remove_lost_packets() {
@@ -1331,6 +1376,7 @@ fn detect_and_remove_lost_packets() {
     let ecn = ExplicitCongestionNotification::default();
     let mut context = MockContext::new(&mut path_manager);
     let mut publisher = Publisher::snapshot();
+    let random = &mut random::testing::Generator::default();
 
     manager.largest_acked_packet = Some(space.new_packet_number(VarInt::from_u8(10)));
 
@@ -1349,6 +1395,8 @@ fn detect_and_remove_lost_packets() {
         outcome,
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1379,6 +1427,8 @@ fn detect_and_remove_lost_packets() {
         outcome,
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1390,6 +1440,8 @@ fn detect_and_remove_lost_packets() {
         outcome,
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1401,6 +1453,8 @@ fn detect_and_remove_lost_packets() {
         outcome,
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1414,7 +1468,7 @@ fn detect_and_remove_lost_packets() {
     assert_eq!(bytes_in_flight, 4);
 
     let now = time_sent;
-    manager.detect_and_remove_lost_packets(now, &mut context, &mut publisher);
+    manager.detect_and_remove_lost_packets(now, random, &mut context, &mut publisher);
 
     //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
     //= type=test
@@ -1524,6 +1578,8 @@ fn detect_lost_packets_persistent_congestion_path_aware() {
             outcome,
             now,
             ecn,
+            transmission::Mode::Normal,
+            None,
             &mut context,
             &mut publisher,
         );
@@ -1537,6 +1593,8 @@ fn detect_lost_packets_persistent_congestion_path_aware() {
             outcome,
             now,
             ecn,
+            transmission::Mode::Normal,
+            None,
             &mut context,
             &mut publisher,
         );
@@ -1550,6 +1608,8 @@ fn detect_lost_packets_persistent_congestion_path_aware() {
             outcome,
             now,
             ecn,
+            transmission::Mode::Normal,
+            None,
             &mut context,
             &mut publisher,
         );
@@ -1605,6 +1665,7 @@ fn remove_lost_packets_persistent_congestion_path_aware() {
     let ecn = ExplicitCongestionNotification::default();
     let mut context = MockContext::new(&mut path_manager);
     let mut now = s2n_quic_platform::time::now();
+    let random = &mut random::testing::Generator::default();
 
     assert_eq!(
         context
@@ -1664,7 +1725,8 @@ fn remove_lost_packets_persistent_congestion_path_aware() {
                 AckElicitation::Eliciting,
                 first_path_id,
                 ecn,
-                (),
+                transmission::Mode::Normal,
+                Default::default(),
             ),
         ),
         (
@@ -1676,7 +1738,8 @@ fn remove_lost_packets_persistent_congestion_path_aware() {
                 AckElicitation::Eliciting,
                 second_path_id,
                 ecn,
-                (),
+                transmission::Mode::Normal,
+                Default::default(),
             ),
         ),
     ];
@@ -1687,6 +1750,7 @@ fn remove_lost_packets_persistent_congestion_path_aware() {
         now,
         Duration::from_secs(20),
         sent_packets_to_remove,
+        random,
         &mut context,
         &mut publisher,
     );
@@ -1727,6 +1791,7 @@ fn detect_and_remove_lost_packets_nothing_lost() {
     let mut context = MockContext::new(&mut path_manager);
     manager.largest_acked_packet = Some(space.new_packet_number(VarInt::from_u8(10)));
     let mut publisher = Publisher::snapshot();
+    let random = &mut random::testing::Generator::default();
 
     let time_sent = s2n_quic_platform::time::now();
     let outcome = transmission::Outcome {
@@ -1743,11 +1808,13 @@ fn detect_and_remove_lost_packets_nothing_lost() {
         outcome,
         time_sent,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
 
-    manager.detect_and_remove_lost_packets(time_sent, &mut context, &mut publisher);
+    manager.detect_and_remove_lost_packets(time_sent, random, &mut context, &mut publisher);
 
     // Verify no lost bytes are sent to the congestion controller and
     // on_packets_lost is not called
@@ -1777,6 +1844,7 @@ fn detect_and_remove_lost_packets_mtu_probe() {
     let mut context = MockContext::new(&mut path_manager);
     manager.largest_acked_packet = Some(space.new_packet_number(VarInt::from_u8(10)));
     let mut publisher = Publisher::snapshot();
+    let random = &mut random::testing::Generator::default();
 
     let time_sent = s2n_quic_platform::time::now();
     let outcome = transmission::Outcome {
@@ -1793,6 +1861,8 @@ fn detect_and_remove_lost_packets_mtu_probe() {
         outcome,
         time_sent,
         ecn,
+        transmission::Mode::MtuProbing,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1801,7 +1871,7 @@ fn detect_and_remove_lost_packets_mtu_probe() {
         MINIMUM_MTU as u32 + 1
     );
 
-    manager.detect_and_remove_lost_packets(time_sent, &mut context, &mut publisher);
+    manager.detect_and_remove_lost_packets(time_sent, random, &mut context, &mut publisher);
 
     // Verify no lost bytes are sent to the congestion controller and
     // on_packets_lost is not called, but bytes_in_flight is reduced
@@ -1851,6 +1921,8 @@ fn persistent_congestion() {
         outcome,
         time_zero,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1861,6 +1933,8 @@ fn persistent_congestion() {
         outcome,
         time_zero + Duration::from_secs(1),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1885,6 +1959,8 @@ fn persistent_congestion() {
             outcome,
             time_zero + Duration::from_secs(t.into()),
             ecn,
+            transmission::Mode::Normal,
+            None,
             &mut context,
             &mut publisher,
         );
@@ -1897,6 +1973,8 @@ fn persistent_congestion() {
         outcome,
         time_zero + Duration::from_secs(8),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1907,6 +1985,8 @@ fn persistent_congestion() {
         outcome,
         time_zero + Duration::from_secs(12),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -1949,6 +2029,8 @@ fn persistent_congestion() {
         outcome,
         time_zero + Duration::from_secs(20),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2002,6 +2084,8 @@ fn persistent_congestion_multiple_periods() {
         outcome,
         time_zero,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2012,6 +2096,8 @@ fn persistent_congestion_multiple_periods() {
         outcome,
         time_zero + Duration::from_secs(1),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2033,6 +2119,8 @@ fn persistent_congestion_multiple_periods() {
             outcome,
             time_zero + Duration::from_secs(t.into()),
             ecn,
+            transmission::Mode::Normal,
+            None,
             &mut context,
             &mut publisher,
         );
@@ -2046,6 +2134,8 @@ fn persistent_congestion_multiple_periods() {
         outcome,
         time_zero + Duration::from_secs(8),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2056,6 +2146,8 @@ fn persistent_congestion_multiple_periods() {
         outcome,
         time_zero + Duration::from_secs(20),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2066,6 +2158,8 @@ fn persistent_congestion_multiple_periods() {
         outcome,
         time_zero + Duration::from_secs(30),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2125,6 +2219,8 @@ fn persistent_congestion_period_does_not_start_until_rtt_sample() {
         outcome,
         time_zero,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2135,6 +2231,8 @@ fn persistent_congestion_period_does_not_start_until_rtt_sample() {
         outcome,
         time_zero + Duration::from_secs(10),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2145,6 +2243,8 @@ fn persistent_congestion_period_does_not_start_until_rtt_sample() {
         outcome,
         time_zero + Duration::from_secs(20),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2205,6 +2305,8 @@ fn persistent_congestion_not_ack_eliciting() {
         outcome,
         time_zero,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2218,6 +2320,8 @@ fn persistent_congestion_not_ack_eliciting() {
         outcome,
         time_zero + Duration::from_secs(10),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2228,6 +2332,8 @@ fn persistent_congestion_not_ack_eliciting() {
         outcome,
         time_zero + Duration::from_secs(20),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2245,6 +2351,92 @@ fn persistent_congestion_not_ack_eliciting() {
     // There is no persistent congestion because the first packet in the potential
     // persistent congestion period was not ack-eliciting.
     assert_eq!(context.path().congestion_controller.on_packets_lost, 2);
+    assert_eq!(
+        context.path().congestion_controller.persistent_congestion,
+        Some(false)
+    );
+}
+
+//= https://www.rfc-editor.org/rfc/rfc9000#section-14.4
+//= type=test
+//# Loss of a QUIC packet that is carried in a PMTU probe is therefore not a
+//# reliable indication of congestion and SHOULD NOT trigger a congestion
+//# control reaction; see Item 7 in Section 3 of [DPLPMTUD].
+#[test]
+fn persistent_congestion_mtu_probe() {
+    let space = PacketNumberSpace::ApplicationData;
+    let mut manager = Manager::new(space);
+    let mut path_manager = helper_generate_path_manager(Duration::from_millis(10));
+    let ecn = ExplicitCongestionNotification::default();
+    let mut context = MockContext::new(&mut path_manager);
+    let mut publisher = Publisher::snapshot();
+
+    let time_zero = s2n_quic_platform::time::now() + Duration::from_secs(10);
+    context.path_mut().rtt_estimator.update_rtt(
+        Duration::from_millis(10),
+        Duration::from_millis(700),
+        s2n_quic_platform::time::now(),
+        true,
+        space,
+    );
+
+    let outcome = transmission::Outcome {
+        ack_elicitation: AckElicitation::Eliciting,
+        is_congestion_controlled: true,
+        bytes_sent: 1,
+        bytes_progressed: 0,
+    };
+
+    // t=0: Send packet #1 (app data)
+    manager.on_packet_sent(
+        space.new_packet_number(VarInt::from_u8(1)),
+        outcome,
+        time_zero,
+        ecn,
+        transmission::Mode::MtuProbing,
+        None,
+        &mut context,
+        &mut publisher,
+    );
+
+    // t=10: Send packet #2 (app data)
+    manager.on_packet_sent(
+        space.new_packet_number(VarInt::from_u8(2)),
+        outcome,
+        time_zero + Duration::from_secs(10),
+        ecn,
+        transmission::Mode::Normal,
+        None,
+        &mut context,
+        &mut publisher,
+    );
+
+    // t=20: Send packet #3 (app data)
+    manager.on_packet_sent(
+        space.new_packet_number(VarInt::from_u8(3)),
+        outcome,
+        time_zero + Duration::from_secs(20),
+        ecn,
+        transmission::Mode::Normal,
+        None,
+        &mut context,
+        &mut publisher,
+    );
+
+    // t=20.1: Recv acknowledgement of #3
+    ack_packets(
+        3..=3,
+        time_zero + Duration::from_millis(20_100),
+        &mut context,
+        &mut manager,
+        None,
+        &mut publisher,
+    );
+
+    // There is no persistent congestion because the first packet in the potential
+    // persistent congestion period was an MTU probe and the remaining packets are
+    // not a long enough period to be considered persistent congestion.
+    assert_eq!(context.path().congestion_controller.on_packets_lost, 1);
     assert_eq!(
         context.path().congestion_controller.persistent_congestion,
         Some(false)
@@ -2344,6 +2536,8 @@ fn update_pto_timer() {
         },
         now,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2455,12 +2649,13 @@ fn on_timeout() {
     let ecn = ExplicitCongestionNotification::default();
     let mut context = MockContext::new(&mut path_manager);
     let mut publisher = Publisher::snapshot();
+    let random = &mut random::testing::Generator::default();
 
     let mut expected_pto_backoff = context.path().pto_backoff;
 
     // Loss timer is armed but not expired yet, nothing happens
     manager.loss_timer.set(now + Duration::from_secs(10));
-    manager.on_timeout(now, &mut context, &mut publisher);
+    manager.on_timeout(now, random, &mut context, &mut publisher);
     assert_eq!(context.on_packet_loss_count, 0);
     //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
     //= type=test
@@ -2480,13 +2675,15 @@ fn on_timeout() {
         },
         now - Duration::from_secs(5),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
 
     // Loss timer is armed and expired, on_packet_loss is called
     manager.loss_timer.set(now - Duration::from_secs(1));
-    manager.on_timeout(now, &mut context, &mut publisher);
+    manager.on_timeout(now, random, &mut context, &mut publisher);
     assert_eq!(context.on_packet_loss_count, 1);
     //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
     //= type=test
@@ -2497,19 +2694,19 @@ fn on_timeout() {
 
     // Loss timer is not armed, pto timer is not armed
     manager.loss_timer.cancel();
-    manager.on_timeout(now, &mut context, &mut publisher);
+    manager.on_timeout(now, random, &mut context, &mut publisher);
     assert_eq!(expected_pto_backoff, context.path().pto_backoff);
 
     // Loss timer is not armed, pto timer is armed but not expired
     manager.loss_timer.cancel();
     manager.pto.timer.set(now + Duration::from_secs(5));
-    manager.on_timeout(now, &mut context, &mut publisher);
+    manager.on_timeout(now, random, &mut context, &mut publisher);
     assert_eq!(expected_pto_backoff, context.path().pto_backoff);
 
     // Loss timer is not armed, pto timer is expired without bytes in flight
     expected_pto_backoff *= 2;
     manager.pto.timer.set(now - Duration::from_secs(5));
-    manager.on_timeout(now, &mut context, &mut publisher);
+    manager.on_timeout(now, random, &mut context, &mut publisher);
     assert_eq!(expected_pto_backoff, context.path().pto_backoff);
     assert_eq!(manager.pto.state, RequiresTransmission(1));
 
@@ -2529,11 +2726,12 @@ fn on_timeout() {
             AckElicitation::Eliciting,
             unsafe { path::Id::new(0) },
             ecn,
-            (),
+            transmission::Mode::Normal,
+            Default::default(),
         ),
     );
     manager.pto.timer.set(now - Duration::from_secs(5));
-    manager.on_timeout(now, &mut context, &mut publisher);
+    manager.on_timeout(now, random, &mut context, &mut publisher);
     assert_eq!(expected_pto_backoff, context.path().pto_backoff);
 
     //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
@@ -2688,6 +2886,7 @@ fn helper_ack_packets_on_path(
         .path(&remote_address)
         .expect("missing path");
     context.path_id = id;
+    let random = &mut random::testing::Generator::default();
 
     let acked_packets = PacketNumberRange::new(
         manager
@@ -2718,7 +2917,14 @@ fn helper_ack_packets_on_path(
         ecn_counts,
     };
 
-    let _ = manager.on_ack_frame(datagram.timestamp, frame, context, publisher);
+    let _ = manager.on_ack_frame(
+        datagram.timestamp,
+        frame,
+        acked_packets.start(),
+        random,
+        context,
+        publisher,
+    );
 
     for packet in acked_packets {
         assert!(manager.sent_packets.get(packet).is_none());
@@ -2785,6 +2991,8 @@ fn probe_packets_count_towards_bytes_in_flight() {
         outcome,
         s2n_quic_platform::time::now(),
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2837,7 +3045,7 @@ fn timer_granularity() {
     //# timer granularity (kGranularity) is 1 millisecond.
     assert_eq!(Duration::from_millis(1), K_GRANULARITY);
 
-    let mut rtt_estimator = RttEstimator::new(Duration::from_millis(0));
+    let mut rtt_estimator = RttEstimator::default();
     rtt_estimator.update_rtt(
         Duration::from_millis(0),
         Duration::from_nanos(1),
@@ -2870,11 +3078,14 @@ fn packet_declared_lost_less_than_1_ms_from_loss_threshold() {
         bytes_sent: 100,
         bytes_progressed: 0,
     };
+    let random = &mut random::testing::Generator::default();
     manager.on_packet_sent(
         space.new_packet_number(VarInt::from_u8(1)),
         outcome,
         sent_time,
         ecn,
+        transmission::Mode::Normal,
+        None,
         &mut context,
         &mut publisher,
     );
@@ -2884,6 +3095,7 @@ fn packet_declared_lost_less_than_1_ms_from_loss_threshold() {
 
     manager.detect_and_remove_lost_packets(
         sent_time + loss_time_threshold - Duration::from_micros(999),
+        random,
         &mut context,
         &mut publisher,
     );

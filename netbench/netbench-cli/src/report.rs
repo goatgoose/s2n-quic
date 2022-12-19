@@ -36,26 +36,8 @@ impl Report {
         let mut signals = vec![];
         let mut names = vec![];
         let mut scenario_names = BTreeSet::new();
-
-        // expose an option to select the view
-        signals.push(json!({
-            "name": "ui$view",
-            "value": Stat::NAMES[0],
-            "bind": {
-                "input": "select",
-                "name": "View",
-                "options": Stat::NAMES,
-            },
-        }));
-
-        // translate the view name into an index
-        signals.push(json!({
-            "name": "sig$view",
-            "value": "0",
-            "update": format!("indexof({:?},ui$view)", Stat::NAMES),
-        }));
-
         let mut stream_ids = HashMap::new();
+        let mut trace_ids = vec![];
         let mut pids = vec![];
 
         for (pid, input) in self.inputs.iter().enumerate() {
@@ -66,7 +48,10 @@ impl Report {
             let mut first = String::new();
             input.read_line(&mut first)?;
             let Initialize {
-                driver, scenario, ..
+                driver,
+                scenario,
+                traces,
+                ..
             } = serde_json::from_str(&first)?;
 
             let name = driver
@@ -104,8 +89,12 @@ impl Report {
                     reallocs,
                     deallocs,
                     syscalls,
+                    connections,
+                    accept,
                     send,
                     receive,
+                    connect_time,
+                    profiles,
                 } = event?;
 
                 let x = time.as_millis() as u64;
@@ -166,6 +155,8 @@ impl Report {
                 emit!(Branches, branches);
                 emit!(ContextSwitches, context_switches);
                 emit!(Syscalls, syscalls);
+                emit!(Connections, connections);
+                emit!(Accept, accept);
                 emit!(AllocBytes, allocs.total);
                 emit!(AllocCount, allocs.count);
                 emit!(ReallocBytes, reallocs.total);
@@ -204,6 +195,69 @@ impl Report {
                     );
                 }
 
+                {
+                    let mut y = connect_time.average();
+
+                    if !f64::is_normal(y) {
+                        y = 0.0;
+                    }
+
+                    // convert micros to seconds
+                    y /= 1_000_000.0;
+
+                    stats_table.push(Row {
+                        x,
+                        y,
+                        pid,
+                        stat: Stat::ConnectTime as _,
+                        stream_id: None,
+                    });
+                }
+
+                for (trace_id, hist) in profiles {
+                    let trace = &traces[trace_id as usize];
+                    let trace_id = if let Some(id) = trace_ids.iter().position(|v| v == trace) {
+                        id as u64
+                    } else {
+                        let id = trace_ids.len() as u64;
+                        trace_ids.push(trace.to_string());
+                        id
+                    };
+
+                    // offset the stat id with the built-in names
+                    let stat = Stat::NAMES.len() as u64 + trace_id;
+
+                    let mut y = hist.stat.average();
+                    if !f64::is_normal(y) {
+                        y = 0.0;
+                    }
+
+                    // convert micros to seconds
+                    let y = y / 1_000_000.0;
+
+                    stats_table.push(Row {
+                        x,
+                        y,
+                        pid,
+                        stat,
+                        stream_id: None,
+                    });
+
+                    /*
+                     // TODO figure out how to visualize multiple histograms over time
+                    for bucket in hist.buckets {
+                        profile_hist_table.push(Bucket {
+                            x,
+                            pid,
+                            trace_id,
+                            lower: bucket.lower,
+                            upper: bucket.upper,
+                            count: bucket.count,
+                        });
+                    }
+                    */
+                }
+
                 prev_x = x;
             }
         }
@@ -220,6 +274,33 @@ impl Report {
                 .then(a.stream_id.cmp(&b.stream_id))
         });
 
+        let mut view_names = Stat::NAMES
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>();
+
+        for trace in &trace_ids {
+            view_names.push(format!("trace - {trace}"));
+        }
+
+        // expose an option to select the view
+        signals.push(json!({
+            "name": "ui$view",
+            "value": &view_names[0],
+            "bind": {
+                "input": "select",
+                "name": "View",
+                "options": view_names,
+            },
+        }));
+
+        // translate the view name into an index
+        signals.push(json!({
+            "name": "sig$view",
+            "value": "0",
+            "update": format!("indexof({:?},ui$view)", view_names),
+        }));
+
         signals.push(json!({
             "name": "pids",
             "value": "[]",
@@ -233,7 +314,8 @@ impl Report {
 
         let mut stream_count_expr = "0".to_string();
         for (id, count) in stream_counts.iter().enumerate() {
-            stream_count_expr.push_str(&format!("+(pids[{}]?{}:0)", id, count));
+            use core::fmt::Write;
+            let _ = write!(stream_count_expr, "+(pids[{}]?{}:0)", id, count);
         }
 
         signals.push(json!({
@@ -331,6 +413,9 @@ stat!(
         Branches = "branches",
         ContextSwitches = "context-switches",
         Syscalls = "syscalls",
+        Connections = "connections",
+        ConnectTime = "connect-time",
+        Accept = "accept (streams)",
         AllocBytes = "alloc (bytes)",
         AllocCount = "alloc (count)",
         ReallocBytes = "realloc (bytes)",
@@ -360,4 +445,19 @@ struct Row {
     stat: u64,
     #[serde(rename = "i", skip_serializing_if = "Option::is_none")]
     stream_id: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct Bucket {
+    x: u64,
+    #[serde(rename = "p")]
+    pid: u64,
+    #[serde(rename = "t")]
+    trace_id: u64,
+    #[serde(rename = "l")]
+    lower: f64,
+    #[serde(rename = "u")]
+    upper: f64,
+    #[serde(rename = "c")]
+    count: u64,
 }

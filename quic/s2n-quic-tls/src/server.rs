@@ -6,20 +6,22 @@ use crate::{
     keylog::KeyLogHandle,
     params::Params,
     session::Session,
+    ConfigLoader,
 };
 use s2n_codec::EncoderValue;
 use s2n_quic_core::{application::ServerName, crypto::tls, endpoint};
 #[cfg(any(test, all(s2n_quic_unstable, feature = "unstable_client_hello")))]
-use s2n_tls::raw::config::ClientHelloHandler;
-use s2n_tls::raw::{
-    config::{self, Config, VerifyClientCertificateHandler},
+use s2n_tls::callbacks::ClientHelloCallback;
+use s2n_tls::{
+    callbacks::VerifyHostNameCallback,
+    config::{self, Config},
+    enums::ClientAuthType,
     error::Error,
-    ffi::s2n_cert_auth_type,
 };
 use std::sync::Arc;
 
-pub struct Server {
-    config: Config,
+pub struct Server<L: ConfigLoader = Config> {
+    loader: L,
     #[allow(dead_code)] // we need to hold on to the handle to ensure it is cleaned up correctly
     keylog: Option<KeyLogHandle>,
     params: Params,
@@ -31,11 +33,41 @@ impl Server {
     }
 }
 
+impl<L: ConfigLoader> Server<L> {
+    /// Creates a [`Server`] from a [`ConfigLoader`]
+    ///
+    /// The caller is responsible for building the `Config`
+    /// correctly for QUIC settings. This includes:
+    /// * setting a security policy that supports TLS 1.3
+    /// * enabling QUIC support
+    /// * setting at least one application protocol
+    pub fn from_loader(loader: L) -> Self {
+        Self {
+            loader,
+            keylog: None,
+            params: Default::default(),
+        }
+    }
+}
+
 impl Default for Server {
     fn default() -> Self {
         Self::builder()
             .build()
             .expect("could not create a default server")
+    }
+}
+
+impl<L: ConfigLoader> ConfigLoader for Server<L> {
+    #[inline]
+    fn load(&mut self, cx: crate::ConnectionContext) -> s2n_tls::config::Config {
+        self.loader.load(cx)
+    }
+}
+
+impl<L: ConfigLoader> From<Server<L>> for Config {
+    fn from(mut server: Server<L>) -> Self {
+        server.load(crate::ConnectionContext { server_name: None })
     }
 }
 
@@ -50,9 +82,7 @@ impl Default for Builder {
         config.enable_quic().unwrap();
         // https://github.com/aws/s2n-tls/blob/main/docs/USAGE-GUIDE.md#s2n_config_set_cipher_preferences
         config.set_security_policy(crate::DEFAULT_POLICY).unwrap();
-        config
-            .set_application_protocol_preference(&[b"h3"])
-            .unwrap();
+        config.set_application_protocol_preference([b"h3"]).unwrap();
 
         Self {
             config,
@@ -63,11 +93,11 @@ impl Default for Builder {
 
 impl Builder {
     #[cfg(any(test, all(s2n_quic_unstable, feature = "unstable_client_hello")))]
-    pub fn with_client_hello_handler<T: 'static + ClientHelloHandler>(
+    pub fn with_client_hello_handler<T: 'static + ClientHelloCallback>(
         mut self,
         handler: T,
     ) -> Result<Self, Error> {
-        self.config.set_client_hello_handler(handler)?;
+        self.config.set_client_hello_callback(handler)?;
         Ok(self)
     }
 
@@ -128,18 +158,30 @@ impl Builder {
 
     /// Configures this server instance to require client authentication (mutual TLS).
     pub fn with_client_authentication(mut self) -> Result<Self, Error> {
-        self.config
-            .set_client_auth_type(s2n_cert_auth_type::REQUIRED)?;
+        self.config.set_client_auth_type(ClientAuthType::Required)?;
         Ok(self)
     }
 
     /// Set the application level certificate verification handler which will be invoked on this
     /// server instance when a client certificate is presented during the mutual TLS handshake.
-    pub fn with_verify_client_certificate_handler<T: 'static + VerifyClientCertificateHandler>(
+    #[deprecated(note = "use `with_verify_host_name_callback` instead")]
+    pub fn with_verify_client_certificate_handler<T: 'static + VerifyHostNameCallback>(
         mut self,
         handler: T,
     ) -> Result<Self, Error> {
-        self.config.set_verify_host_handler(handler)?;
+        self.config.set_verify_host_callback(handler)?;
+        Ok(self)
+    }
+
+    /// Set the host name verification callback.
+    ///
+    /// This will be invoked when a client certificate is presented during a mutual TLS
+    /// handshake.
+    pub fn with_verify_host_name_callback<T: 'static + VerifyHostNameCallback>(
+        mut self,
+        handler: T,
+    ) -> Result<Self, Error> {
+        self.config.set_verify_host_callback(handler)?;
         Ok(self)
     }
 
@@ -165,18 +207,20 @@ impl Builder {
 
     pub fn build(self) -> Result<Server, Error> {
         Ok(Server {
-            config: self.config.build()?,
+            loader: self.config.build()?,
             keylog: self.keylog,
             params: Default::default(),
         })
     }
 }
 
-impl tls::Endpoint for Server {
+impl<L: ConfigLoader> tls::Endpoint for Server<L> {
     type Session = Session;
 
     fn new_server_session<Params: EncoderValue>(&mut self, params: &Params) -> Self::Session {
-        let config = self.config.clone();
+        let config = self
+            .loader
+            .load(crate::ConnectionContext { server_name: None });
         self.params.with(params, |params| {
             Session::new(endpoint::Type::Server, config, params, None).unwrap()
         })

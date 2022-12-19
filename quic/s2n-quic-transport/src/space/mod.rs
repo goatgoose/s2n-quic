@@ -243,6 +243,7 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
         &mut self,
         local_id_registry: &mut connection::LocalIdRegistry,
         path_manager: &mut path::Manager<Config>,
+        random_generator: &mut Config::RandomGenerator,
         timestamp: Timestamp,
         publisher: &mut Pub,
     ) {
@@ -257,6 +258,7 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
                 handshake_status,
                 path_id,
                 path_manager,
+                random_generator,
                 timestamp,
                 publisher,
             )
@@ -266,6 +268,7 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
                 handshake_status,
                 path_id,
                 path_manager,
+                random_generator,
                 timestamp,
                 publisher,
             )
@@ -275,6 +278,7 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
                 path_manager,
                 handshake_status,
                 local_id_registry,
+                random_generator,
                 timestamp,
                 publisher,
             )
@@ -400,14 +404,12 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
                 can_send_handshake,
                 early_connection_close
             );
-            let buffer = write_packet!(
+            write_packet!(
                 buffer,
                 application_mut,
                 can_send_application,
                 connection_close
-            );
-
-            buffer
+            )
         })
     }
 
@@ -443,50 +445,6 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
 
     pub fn retry_cid(&self) -> Option<&PeerId> {
         self.retry_cid.as_deref()
-    }
-
-    pub fn on_pending_ack_ranges<Pub: event::ConnectionPublisher>(
-        &mut self,
-        timestamp: Timestamp,
-        path_id: path::Id,
-        path_manager: &mut path::Manager<Config>,
-        local_id_registry: &mut connection::LocalIdRegistry,
-        publisher: &mut Pub,
-    ) -> Result<(), transport::Error> {
-        debug_assert!(
-            self.application().is_some(),
-            "application space should exists since delay ACK processing is only enabled\
-            post handshake complete and connection indicated ACK interest"
-        );
-        debug_assert!(
-            !self.application().unwrap().pending_ack_ranges.is_empty(),
-            "pending_ack_ranges should be non-empty since connection indicated ACK interest"
-        );
-
-        if let Some((space, handshake_status)) = self.application_mut() {
-            space.on_pending_ack_ranges(
-                timestamp,
-                path_id,
-                path_manager,
-                handshake_status,
-                local_id_registry,
-                publisher,
-            )?;
-        }
-
-        Ok(())
-    }
-}
-
-impl<Config: endpoint::Config> ack::interest::Provider for PacketSpaceManager<Config> {
-    #[inline]
-    fn ack_interest<Q: ack::interest::Query>(&self, query: &mut Q) -> ack::interest::Result {
-        if let Some(space) = self.application() {
-            if !space.pending_ack_ranges.is_empty() {
-                return query.on_interest(ack::interest::Interest::Immediate);
-            }
-        }
-        query.on_interest(ack::interest::Interest::None)
     }
 }
 
@@ -581,8 +539,10 @@ pub trait PacketSpace<Config: endpoint::Config> {
         timestamp: Timestamp,
         path_id: path::Id,
         path_manager: &mut path::Manager<Config>,
+        packet_number: PacketNumber,
         handshake_status: &mut HandshakeStatus,
         local_id_registry: &mut connection::LocalIdRegistry,
+        random_generator: &mut Config::RandomGenerator,
         publisher: &mut Pub,
     ) -> Result<(), transport::Error>;
 
@@ -665,8 +625,8 @@ pub trait PacketSpace<Config: endpoint::Config> {
 
     fn handle_datagram_frame(
         &mut self,
+        _path: s2n_quic_core::event::api::Path<'_>,
         frame: DatagramRef,
-        _packet: &mut ProcessedPacket,
     ) -> Result<(), transport::Error> {
         Err(transport::Error::PROTOCOL_VIOLATION
             .with_reason(Self::INVALID_FRAME_ERROR)
@@ -683,9 +643,12 @@ pub trait PacketSpace<Config: endpoint::Config> {
     default_frame_handler!(handle_streams_blocked_frame, StreamsBlocked);
     default_frame_handler!(handle_new_token_frame, NewToken);
 
-    fn on_processed_packet(
+    fn on_processed_packet<Pub: event::ConnectionPublisher>(
         &mut self,
         processed_packet: ProcessedPacket,
+        path_id: path::Id,
+        path: &Path<Config>,
+        publisher: &mut Pub,
     ) -> Result<(), transport::Error>;
 
     // TODO: Reduce arguments, https://github.com/aws/s2n-quic/issues/312
@@ -713,8 +676,8 @@ pub trait PacketSpace<Config: endpoint::Config> {
 
             // intercept the payload after it is decrypted, but before we process the frames
             packet_interceptor.intercept_rx_payload(
-                publisher.subject(),
-                Packet {
+                &publisher.subject(),
+                &Packet {
                     number: packet_number,
                     timestamp: datagram.timestamp,
                 },
@@ -746,6 +709,7 @@ pub trait PacketSpace<Config: endpoint::Config> {
                 path: path_event!(path, path_id),
                 frame: frame.into_event(),
             });
+
             match frame {
                 Frame::Padding(frame) => {
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-19.1
@@ -785,8 +749,10 @@ pub trait PacketSpace<Config: endpoint::Config> {
                         datagram.timestamp,
                         path_id,
                         path_manager,
+                        packet_number,
                         handshake_status,
                         local_id_registry,
+                        random_generator,
                         publisher,
                     )
                     .map_err(on_error)?;
@@ -810,8 +776,11 @@ pub trait PacketSpace<Config: endpoint::Config> {
                 }
                 Frame::Datagram(frame) => {
                     let on_error = on_frame_processed!(frame);
-                    self.handle_datagram_frame(frame.into(), &mut processed_packet)
-                        .map_err(on_error)?;
+                    self.handle_datagram_frame(
+                        path_event!(path, path_id).into_event(),
+                        frame.into(),
+                    )
+                    .map_err(on_error)?;
                 }
                 Frame::DataBlocked(frame) => {
                     let on_error = on_frame_processed!(frame);
@@ -930,7 +899,7 @@ pub trait PacketSpace<Config: endpoint::Config> {
         //# receipt by sending one or more ACK frames containing the packet
         //# number of the received packet.
 
-        self.on_processed_packet(processed_packet)?;
+        self.on_processed_packet(processed_packet, path_id, &path_manager[path_id], publisher)?;
 
         Ok(processed_packet)
     }

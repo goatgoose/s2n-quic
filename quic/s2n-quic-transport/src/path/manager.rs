@@ -21,7 +21,7 @@ use s2n_quic_core::{
         migration::{self, Validator as _},
         Handle as _, Id, MaxMtu,
     },
-    random::Generator as _,
+    random,
     recovery::{
         congestion_controller::{self, Endpoint as _},
         RttEstimator,
@@ -88,7 +88,7 @@ impl<Config: endpoint::Config> Manager<Config> {
     fn update_active_path<Pub: event::ConnectionPublisher>(
         &mut self,
         new_path_id: Id,
-        random_generator: &mut Config::RandomGenerator,
+        random_generator: &mut dyn random::Generator,
         publisher: &mut Pub,
     ) -> Result<(), transport::Error> {
         debug_assert!(new_path_id != path_id(self.active));
@@ -442,6 +442,12 @@ impl<Config: endpoint::Config> Manager<Config> {
             new: path_event!(path, new_path_id),
         });
 
+        publisher.on_mtu_updated(event::builder::MtuUpdated {
+            path_id: new_path_id.into_event(),
+            mtu: path.mtu_controller.mtu() as u16,
+            cause: MtuUpdatedCause::NewPath,
+        });
+
         // create a new path
         if new_path_idx < self.paths.len() {
             self.paths[new_path_idx] = path;
@@ -452,7 +458,7 @@ impl<Config: endpoint::Config> Manager<Config> {
         Ok((new_path_id, unblocked))
     }
 
-    fn set_challenge(&mut self, path_id: Id, random_generator: &mut Config::RandomGenerator) {
+    fn set_challenge(&mut self, path_id: Id, random_generator: &mut dyn random::Generator) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
         //# The endpoint MUST use unpredictable data in every PATH_CHALLENGE
         //# frame so that it can associate the peer's response with the
@@ -588,7 +594,7 @@ impl<Config: endpoint::Config> Manager<Config> {
         path_id: Id,
         source_connection_id: Option<PeerId>,
         path_validation_probing: path_validation::Probe,
-        random_generator: &mut Config::RandomGenerator,
+        random_generator: &mut dyn random::Generator,
         publisher: &mut Pub,
     ) -> Result<(), transport::Error> {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
@@ -709,7 +715,7 @@ impl<Config: endpoint::Config> Manager<Config> {
     pub fn on_timeout<Pub: event::ConnectionPublisher>(
         &mut self,
         timestamp: Timestamp,
-        random_generator: &mut Config::RandomGenerator,
+        random_generator: &mut dyn random::Generator,
         publisher: &mut Pub,
     ) -> Result<(), connection::Error> {
         for (id, path) in self.paths.iter_mut().enumerate() {
@@ -904,6 +910,7 @@ macro_rules! path_event {
 }
 
 pub(crate) use path_event;
+use s2n_quic_core::event::builder::MtuUpdatedCause;
 
 #[cfg(test)]
 mod tests;

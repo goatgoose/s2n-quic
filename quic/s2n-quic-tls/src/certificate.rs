@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use bytes::Bytes;
-use s2n_tls::raw::error::Error;
+use s2n_tls::error::Error;
 
 impl Format {
     pub fn as_pem(&self) -> Option<&[u8]> {
@@ -89,12 +89,13 @@ macro_rules! cert_type {
             fn $method(self) -> Result<$name, Error> {
                 match self.extension() {
                     Some(ext) if ext == "der" => {
-                        let pem = std::fs::read(self).map_err(|_| Error::InvalidInput)?;
+                        let pem = std::fs::read(self).map_err(|err| Error::io_error(err))?;
                         pem.$method()
                     }
                     // assume it's in pem format
                     _ => {
-                        let pem = std::fs::read_to_string(self).map_err(|_| Error::InvalidInput)?;
+                        let pem =
+                            std::fs::read_to_string(self).map_err(|err| Error::io_error(err))?;
                         pem.$method()
                     }
                 }

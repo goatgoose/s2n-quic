@@ -224,11 +224,11 @@ impl<Config: endpoint::Config> Path<Config> {
     }
 
     #[inline]
-    pub fn on_timeout<Rnd: random::Generator, Pub: event::ConnectionPublisher>(
+    pub fn on_timeout<Pub: event::ConnectionPublisher>(
         &mut self,
         timestamp: Timestamp,
         path_id: Id,
-        random_generator: &mut Rnd,
+        random_generator: &mut dyn random::Generator,
         publisher: &mut Pub,
     ) {
         self.challenge
@@ -435,27 +435,20 @@ impl<Config: endpoint::Config> Path<Config> {
     //# A PL MUST NOT send a datagram (other than a probe
     //# packet) with a size at the PL that is larger than the current
     //# PLPMTU.
+
+    /// Clamps payload sizes to the current MTU for the path
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is called when the path is amplification limited
     #[inline]
     pub fn clamp_mtu(&self, requested_size: usize, transmission_mode: transmission::Mode) -> usize {
-        let mtu = self.mtu(transmission_mode);
+        debug_assert!(
+            !self.at_amplification_limit(),
+            "amplification limits should be checked before clamping MTU values"
+        );
 
-        match self.state {
-            State::Validated => requested_size.min(mtu),
-
-            // https://github.com/aws/s2n-quic/issues/695
-            // Note: while a 3X check if performed, the `limit` value is not used
-            // to restrict the MTU. There are two reasons for this:
-            // - Expanding to the full MTU allows for MTU validation during connection migration.
-            // - Networking infrastructure cares more about number of packets than bytes for
-            // anti-amplification.
-            State::AmplificationLimited { tx_allowance } => {
-                if tx_allowance > 0 {
-                    requested_size.min(mtu)
-                } else {
-                    0
-                }
-            }
-        }
+        requested_size.min(self.mtu(transmission_mode))
     }
 
     #[inline]
@@ -489,18 +482,19 @@ impl<Config: endpoint::Config> Path<Config> {
 
     /// Returns whether this path should be limited according to connection establishment amplification limits
     ///
-    /// Note: This method is more conservative than strictly necessary in declaring a path at the
-    ///       amplification limit. The path must be able to transmit at least a packet of the
-    ///       `MINIMUM_MTU` bytes, otherwise the path is considered at the amplification limit.
-    ///       TODO: Evaluate if this approach is too conservative
+    /// Note: As long as the path has _any_ TX credits we don't consider it to be amplification-limited.
+    ///       This may result in sending slightly more than 3x bytes but networking infrastructure mostly
+    ///       cares about the number of packets rather than bytes.
     #[inline]
     pub fn at_amplification_limit(&self) -> bool {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
         //# Prior to validating the client address, servers MUST NOT send more
         //# than three times as many bytes as the number of bytes they have
         //# received.
-        let mtu = MINIMUM_MTU as usize;
-        self.clamp_mtu(mtu, transmission::Mode::Normal) < mtu
+        match self.state {
+            State::Validated => false,
+            State::AmplificationLimited { tx_allowance } => tx_allowance == 0,
+        }
     }
 
     /// Returns the current PTO period
@@ -536,6 +530,20 @@ impl<Config: endpoint::Config> Path<Config> {
     #[inline]
     pub fn max_mtu(&self) -> MaxMtu {
         self.mtu_controller.max_mtu()
+    }
+
+    /// Returns `true` if the congestion window does not have sufficient space for a packet of
+    /// size `mtu` considering the current bytes in flight and the additional `bytes_sent` provided
+    #[inline]
+    pub fn is_congestion_limited(&self, bytes_sent: usize) -> bool {
+        let cwnd = self.congestion_controller.congestion_window();
+        let bytes_in_flight = self
+            .congestion_controller
+            .bytes_in_flight()
+            .saturating_add(bytes_sent as u32);
+        let mtu = self.mtu(transmission::Mode::Normal) as u32;
+
+        cwnd.saturating_sub(bytes_in_flight) < mtu
     }
 
     // Compare a Path based on its PathHandle.
@@ -1010,8 +1018,7 @@ mod tests {
 
             path.on_bytes_transmitted(1);
             // Verify we can't transmit any more bytes
-            assert_eq!(path.clamp_mtu(1, transmission_mode), 0);
-            assert_eq!(path.clamp_mtu(10, transmission_mode), 0);
+            assert!(path.at_amplification_limit());
 
             path.on_bytes_received(1);
             // Verify we can transmit up to 3 more bytes
@@ -1078,21 +1085,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn clamp_mtu_when_tx_more_than_rx() {
         let mut path = testing::helper_path_server();
         let mtu = 1472;
         let probed_size = 1500;
         path.mtu_controller = mtu::testing::test_controller(mtu, probed_size);
 
-        assert_eq!(0, path.clamp_mtu(10000, transmission::Mode::Normal));
-
-        path.on_bytes_received(1);
-        assert_eq!(
-            path.mtu_controller.mtu(),
-            path.clamp_mtu(10000, transmission::Mode::Normal)
-        );
-
-        path.on_bytes_transmitted(100);
         assert_eq!(0, path.clamp_mtu(10000, transmission::Mode::Normal));
     }
 
@@ -1119,6 +1118,10 @@ mod tests {
             DEFAULT_MAX_MTU,
         );
         let now = NoopClock.get_time();
+        let random = &mut random::testing::Generator::default();
+        let mut publisher = event::testing::Publisher::snapshot();
+        let mut publisher =
+            congestion_controller::PathPublisher::new(&mut publisher, path::Id::test_id());
         path.on_validated();
 
         assert_eq!(
@@ -1130,7 +1133,9 @@ mod tests {
         let packet_info = path.congestion_controller.on_packet_sent(
             now,
             path.congestion_controller.congestion_window() as usize,
+            None,
             &path.rtt_estimator,
+            &mut publisher,
         );
 
         assert_eq!(
@@ -1139,8 +1144,15 @@ mod tests {
         );
 
         // Lose a byte to enter recovery
-        path.congestion_controller
-            .on_packet_lost(1, packet_info, false, false, now);
+        path.congestion_controller.on_packet_lost(
+            1,
+            packet_info,
+            false,
+            false,
+            random,
+            now,
+            &mut publisher,
+        );
         path.congestion_controller.requires_fast_retransmission = true;
 
         assert_eq!(
@@ -1154,7 +1166,9 @@ mod tests {
             packet_info,
             false,
             false,
+            random,
             now,
+            &mut publisher,
         );
         path.congestion_controller.requires_fast_retransmission = false;
 
@@ -1199,5 +1213,20 @@ mod tests {
                 assert_eq!(*tx_allowance, 0)
             }
         }
+    }
+
+    #[test]
+    fn is_congestion_limited() {
+        let mut path = testing::helper_path_client();
+        let mtu = path.mtu_controller.mtu() as u32;
+
+        path.congestion_controller.congestion_window = 12000;
+        path.congestion_controller.bytes_in_flight = 12000 - 500 - mtu;
+
+        // There is room for an MTU sized packet after including the 500 bytes, so the path is not congestion limited
+        assert!(!path.is_congestion_limited(500));
+
+        // There isn't room for an MTU sized packet after including the 501 bytes, so the path is congestion limited
+        assert!(path.is_congestion_limited(501));
     }
 }

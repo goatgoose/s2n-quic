@@ -53,16 +53,42 @@ RUN set -eux; \
   if [ "$release" = "true" ]; then \
     export ARGS="--release"; \
   fi; \
+  mkdir -p /app/bin; \
   cd netbench; \
-  cargo build --lib $ARGS;
+  cargo build --lib $ARGS; \
+  if [ "$release" = "true" ]; then \
+    cargo build --bin netbench-collector --release; \
+    cp target/release/netbench-collector /app/bin; \
+  else \
+    cargo build --bin netbench-collector; \
+    cp target/debug/netbench-collector /app/bin; \
+  fi; \
+  rm -rf target
+
+RUN set -eux; \
+  cd netbench; \
+  cargo build --bin netbench-scenarios; \
+  ./target/debug/netbench-scenarios --request_response.request_size 100KB --request_response.response_size 1GB; \
+  cp target/netbench/request_response.json /app/bin; \
+  rm -rf target;
 
 ARG DRIVER="s2n-quic"
 ARG ENDPOINT="client"
 
 RUN set -eux; \
-  mkdir -p /app/bin; \
   export TARGET="netbench-driver-$DRIVER-$ENDPOINT"; \
-  echo "#!/usr/bin/env bash\neval /usr/bin/$TARGET \$@" > /app/bin/start; \
+  if [ "$ENDPOINT" = "server" ]; then \
+    echo "#!/usr/bin/env bash\n \
+    export DISABLE_GSO=1\n \
+    eval /usr/bin/netbench-collector /usr/bin/$TARGET \$@" > /app/bin/start; \
+  else \
+    echo "#!/usr/bin/env bash\n \
+    export SERVER_0=\$(dig +short \$DNS_ADDRESS):\$SERVER_PORT\n \
+    export DISABLE_GSO=1\n \
+    printenv\n \
+    eval /usr/bin/netbench-collector /usr/bin/$TARGET \$@ > client.json\n \
+    aws s3 cp ./client.json s3://\$S3_BUCKET/\$TIMESTAMP/$DRIVER-client.json" > /app/bin/start; \
+  fi; \
   cd netbench; \
   if [ "$release" = "true" ]; then \
     cargo build --bin $TARGET --release; \
@@ -71,15 +97,25 @@ RUN set -eux; \
     cargo build --bin $TARGET; \
     cp target/debug/$TARGET /app/bin; \
   fi; \
-  rm -rf target
+  rm -rf target;
 
 FROM debian:latest
 
 ENV RUST_BACKTRACE="1"
+ARG ENDPOINT="client"
 
 # copy driver
 COPY --from=builder /app/bin /tmp/netbench
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN set -eux; \
+  cd; \
+  if [ "$ENDPOINT" = "client" ]; then \
+    apt-get update && apt-get install -y dnsutils curl sudo unzip; \
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"; \
+    unzip awscliv2.zip; \
+    sudo ./aws/install; \
+  fi; \
   chmod +x /tmp/netbench/*; \
   mv /tmp/netbench/* /usr/bin; \
   echo done

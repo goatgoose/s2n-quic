@@ -15,6 +15,9 @@ mod pacing;
 mod rtt_estimator;
 mod sent_packets;
 
+#[cfg(test)]
+mod simulation;
+
 //= https://www.rfc-editor.org/rfc/rfc9002#section-7.7
 //# Senders SHOULD limit bursts to the initial congestion window; see
 //# Section 7.2.
@@ -31,4 +34,4 @@ mod sent_packets;
 //= tracking-issue=1073
 //# A sender with knowledge that the network path to the
 //# receiver can absorb larger bursts MAY use a higher limit.
-pub const MAX_BURST_PACKETS: u16 = 10;
+pub const MAX_BURST_PACKETS: u32 = 10;

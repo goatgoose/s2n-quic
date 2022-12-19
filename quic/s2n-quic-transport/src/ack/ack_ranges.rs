@@ -1,7 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::interval_set::{IntervalSet, RangeInclusiveIter};
 use core::{
     convert::TryInto,
     num::NonZeroUsize,
@@ -10,6 +9,7 @@ use core::{
 use s2n_quic_core::{
     ack::Settings,
     frame::ack,
+    interval_set::{IntervalSet, RangeInclusiveIter},
     packet::number::{PacketNumber, PacketNumberRange},
     varint::VarInt,
 };
@@ -31,7 +31,10 @@ impl AckRanges {
 
     /// Inserts a packet number; dropping smaller values if needed
     #[inline]
-    pub fn insert_packet_number_range(&mut self, pn_range: PacketNumberRange) -> Result<(), ()> {
+    pub fn insert_packet_number_range(
+        &mut self,
+        pn_range: PacketNumberRange,
+    ) -> Result<(), AckRangesError> {
         let interval = (
             Bound::Included(pn_range.start()),
             Bound::Included(pn_range.end()),
@@ -44,26 +47,48 @@ impl AckRanges {
         match self.0.pop_min() {
             Some(min) => {
                 if min < pn_range.start() {
-                    // TODO: add metrics for ack ranges being dropped
                     let insert_res = self.0.insert(interval);
                     debug_assert!(
                         insert_res.is_ok(),
                         "min range was removed, so it should be possible to insert another range",
                     );
-                    insert_res.map_err(|_| ())
+                    insert_res.map_err(|_| AckRangesError::RangeInsertionFailed {
+                        min: pn_range.start(),
+                        max: pn_range.end(),
+                    })?;
+
+                    Err(AckRangesError::LowestRangeDropped {
+                        min: min.start_inclusive(),
+                        max: min.end_inclusive(),
+                    })
                 } else {
                     // new value is smaller than min so inset it back in the front
                     let _ = self.0.insert_front(min);
-                    Err(())
+                    Err(AckRangesError::RangeInsertionFailed {
+                        min: pn_range.start(),
+                        max: pn_range.end(),
+                    })
                 }
             }
-            None => Err(()),
+            None => {
+                debug_assert!(
+                    false,
+                    "IntervalSet should have capacity and return lowest entry"
+                );
+                Err(AckRangesError::RangeInsertionFailed {
+                    min: pn_range.start(),
+                    max: pn_range.end(),
+                })
+            }
         }
     }
 
     /// Inserts a packet number; dropping smaller values if needed
     #[inline]
-    pub fn insert_packet_number(&mut self, packet_number: PacketNumber) -> Result<(), ()> {
+    pub fn insert_packet_number(
+        &mut self,
+        packet_number: PacketNumber,
+    ) -> Result<(), AckRangesError> {
         self.insert_packet_number_range(PacketNumberRange::new(packet_number, packet_number))
     }
 
@@ -111,6 +136,18 @@ impl DerefMut for AckRanges {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AckRangesError {
+    RangeInsertionFailed {
+        min: PacketNumber,
+        max: PacketNumber,
+    },
+    LowestRangeDropped {
+        min: PacketNumber,
+        max: PacketNumber,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use bolero::check;
@@ -141,7 +178,13 @@ mod tests {
 
         // insert a new packet number gap
         let pn_d = packet_numbers.next().unwrap();
-        assert!(ack_ranges.insert_packet_number(pn_d).is_ok());
+        assert_eq!(
+            ack_ranges.insert_packet_number(pn_d).err().unwrap(),
+            AckRangesError::LowestRangeDropped {
+                min: pn_a,
+                max: pn_a
+            }
+        );
 
         // ensure the previous smaller packet number was dropped
         assert_eq!(ack_ranges.interval_len(), 3);
@@ -151,7 +194,13 @@ mod tests {
         assert!(ack_ranges.contains(&pn_d));
 
         // ensure smaller values are not recorded
-        assert!(ack_ranges.insert_packet_number(pn_a).is_err());
+        assert_eq!(
+            ack_ranges.insert_packet_number(pn_a).err().unwrap(),
+            AckRangesError::RangeInsertionFailed {
+                min: pn_a,
+                max: pn_a
+            }
+        );
         assert_eq!(ack_ranges.interval_len(), 3);
         assert!(!ack_ranges.contains(&pn_a));
         assert!(ack_ranges.contains(&pn_b));
@@ -235,6 +284,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn size_of_snapshots() {
         use core::mem::size_of;
         use insta::assert_debug_snapshot;

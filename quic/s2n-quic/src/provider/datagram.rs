@@ -3,7 +3,12 @@
 
 //! Provides unreliable datagram support
 
-use s2n_quic_core::datagram::{Disabled, Endpoint};
+use s2n_quic_core::datagram::Disabled;
+pub use s2n_quic_core::datagram::{
+    default,
+    traits::{ConnectionInfo, Endpoint, Packet, PreConnectionInfo, Receiver, Sender, WriteError},
+};
+
 pub trait Provider {
     type Endpoint: Endpoint;
     type Error: 'static + core::fmt::Display;

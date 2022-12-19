@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::aes::testing::{for_each_block, Aes};
-use aes::{Aes128, Aes256, BlockDecrypt, BlockEncrypt as _, NewBlockCipher as _};
+use aes::{
+    cipher::{BlockDecrypt, BlockEncrypt as _, KeyInit as _},
+    Aes128, Aes256,
+};
 
 macro_rules! impl_aes {
     ($name:ident, $lower:ident) => {
@@ -28,7 +31,7 @@ macro_rules! impl_aes {
             use super::*;
             use crate::aes::testing::$lower::Implementation;
 
-            pub fn implementations(impls: &mut Vec<Implementation>) {
+            pub fn implementations(mut impls: Vec<Implementation>) -> Vec<Implementation> {
                 impls.push(Implementation {
                     name: "RustCrypto",
                     new: |key| {
@@ -36,6 +39,7 @@ macro_rules! impl_aes {
                         Box::new(aes)
                     },
                 });
+                impls
             }
         }
     };

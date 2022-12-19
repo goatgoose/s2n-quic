@@ -19,6 +19,9 @@ use s2n_codec::{
     DecoderBufferResult, DecoderError, DecoderValue, DecoderValueMut, Encoder, EncoderValue,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// Trait for an transport parameter value
 pub trait TransportParameter: Sized {
     /// The ID or tag for the TransportParameter
@@ -247,6 +250,9 @@ impl From<core::convert::Infallible> for ValidationError {
         MAX_ENCODABLE_VALUE
     }
 }
+
+#[cfg(feature = "std")]
+impl std::error::Error for ValidationError {}
 
 /// Creates a transport parameter struct with the inner codec type
 macro_rules! transport_parameter {
@@ -616,26 +622,6 @@ pub const fn compute_data_window(mbps: u64, rtt: Duration, rtt_count: u64) -> Va
     VarInt::from_u32(window as u32)
 }
 
-#[test]
-fn compute_data_window_test() {
-    assert_eq!(
-        *compute_data_window(150, Duration::from_millis(10), 1),
-        187_500
-    );
-    assert_eq!(
-        *compute_data_window(150, Duration::from_millis(10), 2),
-        375_000
-    );
-    assert_eq!(
-        *compute_data_window(150, Duration::from_millis(100), 2),
-        3_750_000
-    );
-    assert_eq!(
-        *compute_data_window(1500, Duration::from_millis(100), 2),
-        37_500_000
-    );
-}
-
 impl InitialMaxData {
     /// Tuned for 150Mbps with a 100ms RTT
     pub const RECOMMENDED: Self = Self(compute_data_window(150, Duration::from_millis(100), 2));
@@ -782,23 +768,34 @@ impl TransportParameterValidator for InitialMaxStreamsUni {
 //# (represented as a variable-length integer) that represents the maximum
 //# size of a DATAGRAM frame (including the frame type, length, and
 //# payload) the endpoint is willing to receive, in bytes.
-//# The default for this parameter is 0, which indicates that the
-//# endpoint does not support DATAGRAM frames.  A value greater than 0
-//# indicates that the endpoint supports the DATAGRAM frame types and is
-//# willing to receive such frames on this connection.
 transport_parameter!(MaxDatagramFrameSize(VarInt), 0x20, VarInt::from_u16(0));
 
-//= https://www.rfc-editor.org/rfc/rfc9221#section-3
-//# For most uses of DATAGRAM frames, it is RECOMMENDED to send a value of
-//# 65535 in the max_datagram_frame_size transport parameter to indicate that
-//# this endpoint will accept any DATAGRAM frame that fits inside a QUIC packet.
 impl MaxDatagramFrameSize {
-    pub const RECOMMENDED: Self = Self(VarInt::from_u16(65535));
+    //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+    //# For most uses of DATAGRAM frames, it is RECOMMENDED to send a value of
+    //# 65535 in the max_datagram_frame_size transport parameter to indicate that
+    //# this endpoint will accept any DATAGRAM frame that fits inside a QUIC packet.
+    pub const RECOMMENDED: u64 = 65535;
+    //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+    //# The default for this parameter is 0, which indicates that the
+    //# endpoint does not support DATAGRAM frames.  A value greater than 0
+    //# indicates that the endpoint supports the DATAGRAM frame types and is
+    //# willing to receive such frames on this connection.
+    pub const DEFAULT: Self = Self(VarInt::from_u16(0));
 }
 
 impl TransportParameterValidator for MaxDatagramFrameSize {
     fn validate(self) -> Result<Self, DecoderError> {
         Ok(self)
+    }
+}
+
+impl TryFrom<u64> for MaxDatagramFrameSize {
+    type Error = ValidationError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        let value = VarInt::new(value)?;
+        Self::try_from(value)
     }
 }
 
@@ -1084,8 +1081,8 @@ optional_transport_parameter!(RetrySourceConnectionId);
 pub struct InitialFlowControlLimits {
     pub stream_limits: InitialStreamLimits,
     pub max_data: VarInt,
-    pub max_streams_bidi: VarInt,
-    pub max_streams_uni: VarInt,
+    pub max_open_remote_bidirectional_streams: VarInt,
+    pub max_open_remote_unidirectional_streams: VarInt,
 }
 
 /// Associated flow control limits from a set of TransportParameters
@@ -1109,6 +1106,10 @@ impl InitialStreamLimits {
             (_, StreamType::Unidirectional) => self.max_data_uni,
         }
     }
+}
+
+pub struct DatagramLimits {
+    pub max_datagram_payload: u64,
 }
 
 impl<
@@ -1135,8 +1136,8 @@ impl<
         InitialFlowControlLimits {
             stream_limits: self.stream_limits(),
             max_data: **initial_max_data,
-            max_streams_bidi: **initial_max_streams_bidi,
-            max_streams_uni: **initial_max_streams_uni,
+            max_open_remote_bidirectional_streams: **initial_max_streams_bidi,
+            max_open_remote_unidirectional_streams: **initial_max_streams_uni,
         }
     }
 
@@ -1167,6 +1168,18 @@ impl<
             max_ack_delay: max_ack_delay.as_duration(),
             ack_delay_exponent: **ack_delay_exponent,
             ..Default::default()
+        }
+    }
+
+    // Calculates the maximum datagram payload size
+    pub fn datagram_limits(&self) -> DatagramLimits {
+        let max_datagram_payload = self.max_datagram_frame_size.as_u64();
+
+        // We factor in the received max_udp_payload_size since technically it
+        // can be smaller than the received max_datagram_frame_size.
+        let max_udp_payload = self.max_udp_payload_size.as_u64();
+        DatagramLimits {
+            max_datagram_payload: max_datagram_payload.min(max_udp_payload),
         }
     }
 }
@@ -1284,7 +1297,7 @@ macro_rules! impl_transport_parameters {
             ),*
         }
 
-        impl<'a, $($server_param),*> Default for TransportParameters<$($server_param),*>
+        impl<$($server_param),*> Default for TransportParameters<$($server_param),*>
         where
             $(
                 $server_param: TransportParameter,
@@ -1299,7 +1312,7 @@ macro_rules! impl_transport_parameters {
             }
         }
 
-        impl<'a, $($server_param),*> EncoderValue for TransportParameters<$($server_param),*>
+        impl<$($server_param),*> EncoderValue for TransportParameters<$($server_param),*>
         where
             $(
                 $server_param: TransportParameter,
@@ -1434,7 +1447,7 @@ impl<
             };
         }
 
-        load!(max_ack_delay, max_ack_delay);
+        load!(max_idle_timeout, max_idle_timeout);
         load!(data_window, initial_max_data);
         load!(
             bidirectional_local_data_window,
@@ -1445,159 +1458,18 @@ impl<
             initial_max_stream_data_bidi_remote
         );
         load!(unidirectional_data_window, initial_max_stream_data_uni);
-        load!(max_open_bidirectional_streams, initial_max_streams_bidi);
+        load!(
+            max_open_remote_bidirectional_streams,
+            initial_max_streams_bidi
+        );
+
         load!(
             max_open_remote_unidirectional_streams,
             initial_max_streams_uni
         );
         load!(max_ack_delay, max_ack_delay);
+        load!(ack_delay_exponent, ack_delay_exponent);
         load!(max_active_connection_ids, active_connection_id_limit);
-    }
-}
-
-#[cfg(test)]
-mod snapshot_tests {
-    use super::*;
-    use s2n_codec::assert_codec_round_trip_value;
-
-    macro_rules! default_transport_parameter_test {
-        ($endpoint_params:ident) => {
-            let default_value = $endpoint_params::default();
-
-            #[cfg(not(miri))] // snapshot tests don't work on miri
-            insta::assert_debug_snapshot!(
-                concat!(stringify!($endpoint_params), "__default"),
-                default_value
-            );
-            // Tests that a transport parameter will not be sent if it is set
-            // to its default value defined in the rfc.
-            let encoded_output: Vec<u8> =
-                assert_codec_round_trip_value!($endpoint_params, default_value);
-            let expected_output: Vec<u8> = vec![];
-            assert_eq!(
-                encoded_output, expected_output,
-                "Default parameters should be empty"
-            );
-        };
-    }
-
-    #[test]
-    fn default_server_snapshot_test() {
-        default_transport_parameter_test!(ServerTransportParameters);
-    }
-
-    #[test]
-    fn default_client_snapshot_test() {
-        default_transport_parameter_test!(ClientTransportParameters);
-    }
-
-    fn server_transport_parameters() -> ServerTransportParameters {
-        // pick a value that isn't the default for any of the params
-        let integer_value = VarInt::from_u8(42);
-
-        ServerTransportParameters {
-            max_idle_timeout: integer_value.try_into().unwrap(),
-            max_udp_payload_size: MaxUdpPayloadSize::new(1500u16).unwrap(),
-            initial_max_data: integer_value.try_into().unwrap(),
-            initial_max_stream_data_bidi_local: integer_value.try_into().unwrap(),
-            initial_max_stream_data_bidi_remote: integer_value.try_into().unwrap(),
-            initial_max_stream_data_uni: integer_value.try_into().unwrap(),
-            initial_max_streams_bidi: integer_value.try_into().unwrap(),
-            initial_max_streams_uni: integer_value.try_into().unwrap(),
-            max_datagram_frame_size: MaxDatagramFrameSize::new(0u16).unwrap(),
-            ack_delay_exponent: 2u8.try_into().unwrap(),
-            max_ack_delay: integer_value.try_into().unwrap(),
-            migration_support: MigrationSupport::Disabled,
-            active_connection_id_limit: integer_value.try_into().unwrap(),
-            original_destination_connection_id: Some(
-                [1, 2, 3, 4, 5, 6, 7, 8][..].try_into().unwrap(),
-            ),
-            stateless_reset_token: Some([2; 16].into()),
-            preferred_address: Some(PreferredAddress {
-                ipv4_address: Some(SocketAddressV4::new([127, 0, 0, 1], 1337)),
-                ipv6_address: None,
-                connection_id: [4, 5, 6, 7][..].try_into().unwrap(),
-                stateless_reset_token: [1; 16].into(),
-            }),
-            initial_source_connection_id: Some([1, 2, 3, 4][..].try_into().unwrap()),
-            retry_source_connection_id: Some([1, 2, 3, 4][..].try_into().unwrap()),
-        }
-    }
-
-    #[test]
-    fn server_snapshot_test() {
-        let value = server_transport_parameters();
-        let encoded_output = assert_codec_round_trip_value!(ServerTransportParameters, value);
-
-        #[cfg(not(miri))] // snapshot tests don't work on miri
-        insta::assert_debug_snapshot!("server_snapshot_test", encoded_output);
-
-        let _ = encoded_output;
-    }
-
-    fn client_transport_parameters() -> ClientTransportParameters {
-        // pick a value that isn't the default for any of the params
-        let integer_value = VarInt::from_u8(42);
-
-        ClientTransportParameters {
-            max_idle_timeout: integer_value.try_into().unwrap(),
-            max_udp_payload_size: MaxUdpPayloadSize::new(1500u16).unwrap(),
-            initial_max_data: integer_value.try_into().unwrap(),
-            initial_max_stream_data_bidi_local: integer_value.try_into().unwrap(),
-            initial_max_stream_data_bidi_remote: integer_value.try_into().unwrap(),
-            initial_max_stream_data_uni: integer_value.try_into().unwrap(),
-            initial_max_streams_bidi: integer_value.try_into().unwrap(),
-            initial_max_streams_uni: integer_value.try_into().unwrap(),
-            max_datagram_frame_size: MaxDatagramFrameSize::new(0u16).unwrap(),
-            ack_delay_exponent: 2u8.try_into().unwrap(),
-            max_ack_delay: integer_value.try_into().unwrap(),
-            migration_support: MigrationSupport::Disabled,
-            active_connection_id_limit: integer_value.try_into().unwrap(),
-            original_destination_connection_id: Default::default(),
-            stateless_reset_token: Default::default(),
-            preferred_address: Default::default(),
-            initial_source_connection_id: Some([1, 2, 3, 4][..].try_into().unwrap()),
-            retry_source_connection_id: Default::default(),
-        }
-    }
-
-    #[test]
-    fn client_snapshot_test() {
-        let value = client_transport_parameters();
-        let encoded_output = assert_codec_round_trip_value!(ClientTransportParameters, value);
-
-        #[cfg(not(miri))] // snapshot tests don't work on miri
-        insta::assert_debug_snapshot!("client_snapshot_test", encoded_output);
-
-        let _ = encoded_output;
-    }
-
-    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.2
-    //= type=test
-    //# An endpoint MUST ignore transport parameters that it does
-    //# not support.
-    #[test]
-    fn ignore_unknown_parameter() {
-        use s2n_codec::EncoderBuffer;
-
-        let value = client_transport_parameters();
-
-        // Reserved parameters have tags of the form 31 * N + 27
-        // We inject one at the end
-        let mut buffer = vec![0; 32 * 1024];
-        let mut encoder = EncoderBuffer::new(&mut buffer);
-
-        encoder.encode(&value);
-
-        let id1: TransportParameterId = VarInt::from_u16(31 * 2 + 27);
-        encoder.encode(&id1);
-        encoder.encode_with_len_prefix::<TransportParameterLength, _>(&());
-
-        let (encoded, _) = encoder.split_off();
-        let decoder = DecoderBuffer::new(encoded);
-        let (decoded_params, remaining) =
-            ClientTransportParameters::decode(decoder).expect("Decoding succeeds");
-        assert_eq!(value, decoded_params);
-        assert_eq!(0, remaining.len());
+        load!(max_datagram_frame_size, max_datagram_frame_size);
     }
 }

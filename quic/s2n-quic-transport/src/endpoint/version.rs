@@ -20,7 +20,7 @@ pub struct Negotiator<Config: endpoint::Config> {
     max_peers: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Error;
 
 const SUPPORTED_VERSIONS: &[u32] = &[
@@ -259,7 +259,7 @@ impl<Path: path::Handle> tx::Message for &Transmission<Path> {
     }
 
     #[inline]
-    fn can_gso(&self, segment_len: usize) -> bool {
+    fn can_gso(&self, segment_len: usize, _segment_count: usize) -> bool {
         segment_len >= self.as_ref().len()
     }
 

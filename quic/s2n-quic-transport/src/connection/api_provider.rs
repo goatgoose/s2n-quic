@@ -17,8 +17,8 @@ use core::{
 use s2n_quic_core::{
     application,
     application::ServerName,
-    event::query::{Query, QueryMut},
     inet::SocketAddress,
+    query::{Query, QueryMut},
     stream::{ops, StreamId, StreamType},
 };
 
@@ -71,4 +71,6 @@ pub(crate) trait ConnectionApiProvider: Sync + Send {
     fn query_event_context(&self, query: &mut dyn Query) -> Result<(), connection::Error>;
 
     fn query_event_context_mut(&self, query: &mut dyn QueryMut) -> Result<(), connection::Error>;
+
+    fn datagram_mut(&self, query: &mut dyn QueryMut) -> Result<(), connection::Error>;
 }

@@ -15,7 +15,7 @@ env:
   RUST_BACKTRACE: 1
   # Pin the nightly toolchain to prevent breakage.
   # This should be occasionally updated.
-  RUST_NIGHTLY_TOOLCHAIN: nightly-2022-04-12
+  RUST_NIGHTLY_TOOLCHAIN: nightly-2022-09-15
   CDN: https://dnglbrstg7yg.cloudfront.net
   # enable unstable features for testing
   S2N_UNSTABLE_CRYPTO_OPT_TX: 100
@@ -65,7 +65,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, beta]
+        include:
+          - toolchain: stable
+            # fail on stable warnings
+            args: "-D warnings"
+          - toolchain: beta
     steps:
       - uses: actions/checkout@v3
         with:
@@ -86,7 +90,9 @@ jobs:
         uses: actions-rs/cargo@v1.0.3
         with:
           command: clippy
-          args: --all-features --all-targets -- -D warnings
+          # deriving Eq may break API compatibility so we disable it
+          # See https://github.com/rust-lang/rust-clippy/issues/9063
+          args: --all-features --all-targets -- -A clippy::derive_partial_eq_without_eq ${{ matrix.args }}
 
   udeps:
     runs-on: ubuntu-latest
@@ -135,7 +141,7 @@ jobs:
           command: doc
           args: --all-features --no-deps --workspace --exclude s2n-quic-qns
 
-      - uses: aws-actions/configure-aws-credentials@v1.6.1
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -151,59 +157,18 @@ jobs:
           URL="$CDN/$TARGET/s2n_quic/index.html"
           echo "::set-output name=URL::$URL"
 
-      - uses: ouzi-dev/commit-status-updater@v1.1.2
+      - uses: ouzi-dev/commit-status-updater@v2.0.1
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           name: "doc / report"
           status: "success"
           url: "${{ steps.s3.outputs.URL }}"
 
-  docdiff:
-    runs-on: ubuntu-latest
-    needs: env
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          submodules: true
-
-      - uses: actions-rs/toolchain@v1.0.7
-        id: toolchain
-        with:
-          # pin to a specific version so we don't get breakage in the generated html
-          toolchain: ${{ needs.env.outputs.msrv }}
-          profile: minimal
-          override: true
-
-      - uses: camshaft/rust-cache@v1
-
-      - name: Clean up cache
-        run: |
-          rm -f target/release/docdiff
-          rm -f common/docdiff/target/release/docdiff
-
-      - name: Cache docdiff
-        uses: actions/cache@v3.0.2
-        continue-on-error: true
-        with:
-          path: target/release/docdiff
-          key: ${{ runner.os }}-${{ steps.toolchain.outputs.rustc_hash }}-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('common/docdiff/**') }}
-
-      - name: Build docdiff
-        working-directory: common/docdiff
-        run: |
-          if [ ! -f ../../target/release/docdiff ]; then
-            mkdir -p ../../target/release
-            cargo build --release
-            cp target/release/docdiff ../../target/release/docdiff
-          fi
-
-      - name: Run docdiff
-        run: ./target/release/docdiff s2n-quic
-
   test:
     runs-on: ${{ matrix.os }}
     needs: env
     strategy:
+      fail-fast: false
       matrix:
         rust: ${{ fromJson(needs.env.outputs.rust-versions) }}
         os: [ubuntu-latest, macOS-latest, windows-latest]
@@ -215,6 +180,9 @@ jobs:
           - rust: stable
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+          - rust: stable
+            os: ubuntu-latest
+            target: i686-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v3
         with:
@@ -311,61 +279,15 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: true
-
-      - uses: actions-rs/toolchain@v1.0.7
-        id: toolchain
+      - uses: ./.github/actions/duvet
         with:
-          toolchain: stable
-          override: true
-
-      - uses: camshaft/rust-cache@v1
-
-      - name: Clean up cache
-        run: |
-          rm -f target/release/duvet
-          rm -f common/duvet/target/release/duvet
-
-      - name: Cache duvet
-        uses: actions/cache@v3.0.2
-        continue-on-error: true
-        with:
-          path: target/release/duvet
-          key: ${{ runner.os }}-${{ steps.toolchain.outputs.rustc_hash }}-${{ github.job }}-duvet-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('common/duvet/**') }}
-
-      - name: Build duvet
-        working-directory: common/duvet
-        run: |
-          if [ ! -f ../../target/release/duvet ]; then
-            mkdir -p ../../target/release
-            cargo build --release
-            cp target/release/duvet ../../target/release/duvet
-          fi
-
-      - name: Run duvet
-        run: ./scripts/compliance ${{ github.sha }}
-
-      - uses: aws-actions/configure-aws-credentials@v1.6.1
-        if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
-        with:
+          report-script: ./scripts/compliance
+          report-path: ./target/compliance/report.html
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-west-1
-
-      - name: Upload to S3
-        if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
-        id: s3
-        run: |
-          TARGET="${{ github.sha }}/compliance.html"
-          aws s3 cp target/compliance/report.html "s3://s2n-quic-ci-artifacts/$TARGET" --acl private --follow-symlinks
-          URL="$CDN/$TARGET"
-          echo "::set-output name=URL::$URL"
-
-      - uses: ouzi-dev/commit-status-updater@v1.1.2
-        if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
-        with:
-          name: "compliance / report"
-          status: "success"
-          url: "${{ steps.s3.outputs.URL }}"
+          aws-s3-bucket-name: s2n-quic-ci-artifacts
+          aws-s3-region: us-west-1
+          cdn: $CDN
 
   coverage:
     runs-on: ubuntu-latest
@@ -397,7 +319,7 @@ jobs:
           command: llvm-cov
           args: --html --no-fail-fast --workspace --exclude s2n-quic-qns --exclude s2n-quic-events --all-features
 
-      - uses: aws-actions/configure-aws-credentials@v1.6.1
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -413,7 +335,7 @@ jobs:
           URL="$CDN/$TARGET/index.html"
           echo "::set-output name=URL::$URL"
 
-      - uses: ouzi-dev/commit-status-updater@v1.1.2
+      - uses: ouzi-dev/commit-status-updater@v2.0.1
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           name: "coverage / report"
@@ -425,10 +347,12 @@ jobs:
     strategy:
       matrix:
         example:
-          - examples/echo
-          - examples/rustls-provider
           - examples/dos-mitigation
+          - examples/echo
           - examples/event-framework
+          - examples/post-quantum
+          - examples/rustls-provider
+          - examples/unreliable-datagram
 
     steps:
       - uses: actions/checkout@v3
@@ -470,7 +394,7 @@ jobs:
         run: |
           ./scripts/recovery-sim
 
-      - uses: aws-actions/configure-aws-credentials@v1.6.1
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -486,10 +410,59 @@ jobs:
           URL="$CDN/$TARGET/index.html"
           echo "::set-output name=URL::$URL"
 
-      - uses: ouzi-dev/commit-status-updater@v1.1.2
+      - uses: ouzi-dev/commit-status-updater@v2.0.1
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           name: "recovery-simulations / report"
+          status: "success"
+          url: "${{ steps.s3.outputs.URL }}"
+
+  sims:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+
+      - uses: actions-rs/toolchain@v1.0.7
+        id: toolchain
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - uses: camshaft/rust-cache@v1
+
+      - name: Run cargo build
+        uses: actions-rs/cargo@v1.0.3
+        with:
+          command: build
+          args: --bin s2n-quic-sim --release
+
+      - name: Run simulations
+        run: |
+          ./scripts/sim
+
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
+        if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-1
+
+      - name: Upload to S3
+        if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
+        id: s3
+        run: |
+          TARGET="${{ github.sha }}/sim"
+          aws s3 sync target/s2n-quic-sim "s3://s2n-quic-ci-artifacts/$TARGET" --acl private --follow-symlinks
+          URL="$CDN/$TARGET/index.html"
+          echo "::set-output name=URL::$URL"
+
+      - uses: ouzi-dev/commit-status-updater@v2.0.1
+        if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
+        with:
+          name: "sims / report"
           status: "success"
           url: "${{ steps.s3.outputs.URL }}"
 
@@ -589,7 +562,7 @@ jobs:
           cd examples/echo
           cargo build --timings --release
 
-      - uses: aws-actions/configure-aws-credentials@v1.6.1
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -605,7 +578,7 @@ jobs:
           URL="$CDN/$TARGET"
           echo "::set-output name=URL::$URL"
 
-      - uses: ouzi-dev/commit-status-updater@v1.1.2
+      - uses: ouzi-dev/commit-status-updater@v2.0.1
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           name: "timing / report"
@@ -637,3 +610,72 @@ jobs:
           cat /tmp/typos.json
           ! grep -q '[^[:space:]]' /tmp/typos.json
 
+  kani:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+
+      - name: Kani run
+        uses: model-checking/kani-github-action@v0.17
+        with:
+          working-directory: quic/s2n-quic-core
+          args: --tests
+
+  dhat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions-rs/toolchain@v1.0.7
+        id: toolchain
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - uses: camshaft/rust-cache@v1
+
+      - name: Run cargo build
+        working-directory: tools/memory-report
+        run: cargo build --release
+
+      - name: Run server
+        working-directory: tools/memory-report
+        run: ./target/release/memory-report server &
+
+      - name: Run client
+        working-directory: tools/memory-report
+        run: ./target/release/memory-report client > report.tsv
+
+      - name: Prepare artifacts
+        working-directory: tools/memory-report
+        run: |
+          mkdir -p target/report
+          mv report.tsv target/report/
+          mv dhat-heap.json target/report/
+
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
+        if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-1
+
+      - name: Upload to S3
+        if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
+        id: s3
+        working-directory: tools/memory-report
+        run: |
+          TARGET="${{ github.sha }}/dhat"
+          aws s3 sync target/report "s3://s2n-quic-ci-artifacts/$TARGET" --acl private --follow-symlinks
+          URL="$CDN/dhat/dh_view.html?url=/$TARGET/dhat-heap.json"
+          echo "::set-output name=URL::$URL"
+
+      - uses: ouzi-dev/commit-status-updater@v2.0.1
+        if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
+        with:
+          name: "dhat / report"
+          status: "success"
+          url: "${{ steps.s3.outputs.URL }}"

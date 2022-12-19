@@ -1,20 +1,19 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use netbench::{multiplex, scenario, Result};
+use netbench::{duplex, multiplex, scenario, Driver, Result, Timer};
 use netbench_driver::Allocator;
-use std::{collections::HashSet, sync::Arc};
-use structopt::StructOpt;
-use tokio::{
-    io::AsyncReadExt,
-    net::{TcpListener, TcpStream},
-    spawn,
-};
-use s2n_tls_tokio::TlsAcceptor;
-use s2n_tls::raw::{
+use s2n_tls::{
     config::{Builder, Config},
     error::Error,
     security::DEFAULT_TLS13,
+};
+use s2n_tls_tokio::TlsAcceptor;
+use std::{collections::HashSet, sync::Arc};
+use structopt::StructOpt;
+use tokio::{
+    net::{TcpListener, TcpStream},
+    spawn,
 };
 
 #[global_allocator]
@@ -38,15 +37,20 @@ impl Server {
         let server = self.server().await?;
 
         let trace = self.opts.trace();
-        let acceptor = TlsAcceptor::new(self.config()?.build()?);
-        let acceptor: s2n_tls_tokio::TlsAcceptor = acceptor.into();
-        let acceptor = Arc::new(acceptor);
+        let config = self.opts.multiplex();
 
-        let config = netbench::multiplex::Config::default();
+        let acceptor = TlsAcceptor::new(self.config()?.build()?);
+        let acceptor: s2n_tls_tokio::TlsAcceptor<Config> = acceptor;
+        let acceptor = Arc::new(acceptor);
 
         let mut conn_id = 0;
         loop {
             let (connection, _addr) = server.accept().await?;
+
+            if !self.opts.nagle {
+                let _ = connection.set_nodelay(true);
+            }
+
             let scenario = scenario.clone();
             let id = conn_id;
             conn_id += 1;
@@ -54,48 +58,49 @@ impl Server {
             let trace = trace.clone();
             let config = config.clone();
             spawn(async move {
-                if let Err(err) = handle_connection(
-                    acceptor,
-                    connection,
-                    id,
-                    scenario,
-                    trace,
-                    config
-                ).await {
+                if let Err(err) =
+                    handle_connection(acceptor, connection, id, scenario, trace, config).await
+                {
                     eprintln!("error: {}", err);
                 }
             });
         }
 
         async fn handle_connection(
-            acceptor: Arc<s2n_tls_tokio::TlsAcceptor>,
+            acceptor: Arc<s2n_tls_tokio::TlsAcceptor<Config>>,
             connection: TcpStream,
             conn_id: u64,
             scenario: Arc<scenario::Server>,
             mut trace: impl netbench::Trace,
-            config: multiplex::Config,
+            config: Option<multiplex::Config>,
         ) -> Result<()> {
-            let mut connection = acceptor.accept(connection).await?;
-            let server_idx = connection.read_u64().await?;
-            let scenario = scenario
-                .connections
-                .get(server_idx as usize)
-                .ok_or("invalid connection id")?;
+            let mut timer = netbench::timer::Tokio::default();
+            let before = timer.now();
+
+            let connection = acceptor.accept(connection).await?;
+
+            let now = timer.now();
+            trace.connect(now, conn_id, now - before);
+
+            let server_name = connection
+                .as_ref()
+                .server_name()
+                .ok_or("missing server name")?;
+            let scenario = scenario.on_server_name(server_name)?;
+
             let connection = Box::pin(connection);
 
-            let conn = netbench::Driver::new(
-                scenario,
-                netbench::multiplex::Connection::new(
-                    conn_id,
-                    connection,
-                    config
-                )
-            );
-
             let mut checkpoints = HashSet::new();
-            let mut timer = netbench::timer::Tokio::default();
 
-            conn.run(&mut trace, &mut checkpoints, &mut timer).await?;
+            if let Some(config) = config {
+                let conn = multiplex::Connection::new(conn_id, connection, config);
+                let conn = Driver::new(scenario, conn);
+                conn.run(&mut trace, &mut checkpoints, &mut timer).await?;
+            } else {
+                let conn = duplex::Connection::new(conn_id, connection);
+                let conn = Driver::new(scenario, conn);
+                conn.run(&mut trace, &mut checkpoints, &mut timer).await?;
+            }
 
             Ok(())
         }

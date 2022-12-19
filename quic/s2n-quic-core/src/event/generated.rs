@@ -70,6 +70,44 @@ pub mod api {
     pub struct ConnectionId<'a> {
         pub bytes: &'a [u8],
     }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    pub struct EcnCounts {
+        #[doc = " A variable-length integer representing the total number of packets"]
+        #[doc = " received with the ECT(0) codepoint."]
+        pub ect_0_count: u64,
+        #[doc = " A variable-length integer representing the total number of packets"]
+        #[doc = " received with the ECT(1) codepoint."]
+        pub ect_1_count: u64,
+        #[doc = " A variable-length integer representing the total number of packets"]
+        #[doc = " received with the CE codepoint."]
+        pub ce_count: u64,
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    #[doc = " A bandwidth delivery rate estimate with associated metadata"]
+    pub struct RateSample {
+        #[doc = " The length of the sampling interval"]
+        pub interval: Duration,
+        #[doc = " The amount of data in bytes marked as delivered over the sampling interval"]
+        pub delivered_bytes: u64,
+        #[doc = " The amount of data in bytes marked as lost over the sampling interval"]
+        pub lost_bytes: u64,
+        #[doc = " The number of packets marked as explicit congestion experienced over the sampling interval"]
+        pub ecn_ce_count: u64,
+        #[doc = " PacketInfo::is_app_limited from the most recent acknowledged packet"]
+        pub is_app_limited: bool,
+        #[doc = " PacketInfo::delivered_bytes from the most recent acknowledged packet"]
+        pub prior_delivered_bytes: u64,
+        #[doc = " PacketInfo::bytes_in_flight from the most recent acknowledged packet"]
+        pub bytes_in_flight: u32,
+        #[doc = " PacketInfo::lost_bytes from the most recent acknowledged packet"]
+        pub prior_lost_bytes: u64,
+        #[doc = " PacketInfo::ecn_ce_count from the most recent acknowledged packet"]
+        pub prior_ecn_ce_count: u64,
+        #[doc = " The delivery rate for this rate sample"]
+        pub delivery_rate_bytes_per_second: u64,
+    }
     #[non_exhaustive]
     #[derive(Clone)]
     pub enum SocketAddress<'a> {
@@ -101,11 +139,19 @@ pub mod api {
         #[non_exhaustive]
         Ping {},
         #[non_exhaustive]
-        Ack {},
+        Ack {
+            ecn_counts: Option<EcnCounts>,
+            largest_acknowledged: u64,
+            ack_range_count: u64,
+        },
         #[non_exhaustive]
-        ResetStream {},
+        ResetStream {
+            id: u64,
+            error_code: u64,
+            final_size: u64,
+        },
         #[non_exhaustive]
-        StopSending {},
+        StopSending { id: u64, error_code: u64 },
         #[non_exhaustive]
         Crypto { offset: u64, len: u16 },
         #[non_exhaustive]
@@ -118,17 +164,27 @@ pub mod api {
             is_fin: bool,
         },
         #[non_exhaustive]
-        MaxData {},
+        MaxData { value: u64 },
         #[non_exhaustive]
-        MaxStreamData {},
+        MaxStreamData {
+            stream_type: StreamType,
+            id: u64,
+            value: u64,
+        },
         #[non_exhaustive]
-        MaxStreams { stream_type: StreamType },
+        MaxStreams { stream_type: StreamType, value: u64 },
         #[non_exhaustive]
-        DataBlocked {},
+        DataBlocked { data_limit: u64 },
         #[non_exhaustive]
-        StreamDataBlocked {},
+        StreamDataBlocked {
+            stream_id: u64,
+            stream_data_limit: u64,
+        },
         #[non_exhaustive]
-        StreamsBlocked { stream_type: StreamType },
+        StreamsBlocked {
+            stream_type: StreamType,
+            stream_limit: u64,
+        },
         #[non_exhaustive]
         NewConnectionId {},
         #[non_exhaustive]
@@ -309,6 +365,28 @@ pub mod api {
     }
     #[derive(Clone, Debug)]
     #[non_exhaustive]
+    #[deprecated(note = "use on_rx_ack_range_dropped event instead")]
+    pub enum AckAction {
+        #[non_exhaustive]
+        #[doc = " Ack range for received packets was dropped due to space constraints"]
+        #[doc = ""]
+        #[doc = " For the purpose of processing Acks, RX packet numbers are stored as"]
+        #[doc = " packet_number ranges in an IntervalSet; only lower and upper bounds"]
+        #[doc = " are stored instead of individual packet_numbers. Ranges are merged"]
+        #[doc = " when possible so only disjointed ranges are stored."]
+        #[doc = ""]
+        #[doc = " When at `capacity`, the lowest packet_number range is dropped."]
+        RxAckRangeDropped {
+            #[doc = " The packet number range which was dropped"]
+            packet_number_range: core::ops::RangeInclusive<u64>,
+            #[doc = " The number of disjoint ranges the IntervalSet can store"]
+            capacity: usize,
+            #[doc = " The store packet_number range in the IntervalSet"]
+            stored_range: core::ops::RangeInclusive<u64>,
+        },
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
     pub enum RetryDiscardReason<'a> {
         #[non_exhaustive]
         #[doc = " Received a Retry packet with SCID field equal to DCID field."]
@@ -408,6 +486,59 @@ pub mod api {
         Validated {},
         #[non_exhaustive]
         Abandoned {},
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    #[doc = " The reason the slow start congestion controller state has been exited"]
+    pub enum SlowStartExitCause {
+        #[non_exhaustive]
+        #[doc = " A packet was determined lost"]
+        PacketLoss {},
+        #[non_exhaustive]
+        #[doc = " An Explicit Congestion Notification: Congestion Experienced marking was received"]
+        Ecn {},
+        #[non_exhaustive]
+        #[doc = " The round trip time estimate was updated"]
+        Rtt {},
+        #[non_exhaustive]
+        #[doc = " Slow Start exited due to a reason other than those above"]
+        #[doc = ""]
+        #[doc = " With the Cubic congestion controller, this reason is used after the initial exiting of"]
+        #[doc = " Slow Start, when the previously determined Slow Start threshold is exceed by the"]
+        #[doc = " congestion window."]
+        Other {},
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    #[doc = " The reason the MTU was updated"]
+    pub enum MtuUpdatedCause {
+        #[non_exhaustive]
+        #[doc = " The MTU was initialized with the default value"]
+        NewPath {},
+        #[non_exhaustive]
+        #[doc = " An MTU probe was acknowledged by the peer"]
+        ProbeAcknowledged {},
+        #[non_exhaustive]
+        #[doc = " A blackhole was detected"]
+        Blackhole {},
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    pub enum BbrState {
+        #[non_exhaustive]
+        Startup {},
+        #[non_exhaustive]
+        Drain {},
+        #[non_exhaustive]
+        ProbeBwDown {},
+        #[non_exhaustive]
+        ProbeBwCruise {},
+        #[non_exhaustive]
+        ProbeBwRefill {},
+        #[non_exhaustive]
+        ProbeBwUp {},
+        #[non_exhaustive]
+        ProbeRtt {},
     }
     #[derive(Clone, Debug)]
     #[non_exhaustive]
@@ -512,6 +643,7 @@ pub mod api {
         pub pto_count: u32,
         pub congestion_window: u32,
         pub bytes_in_flight: u32,
+        pub congestion_limited: bool,
     }
     impl<'a> Event for RecoveryMetrics<'a> {
         const NAME: &'static str = "recovery:metrics_updated";
@@ -525,6 +657,52 @@ pub mod api {
     }
     impl<'a> Event for Congestion<'a> {
         const NAME: &'static str = "recovery:congestion";
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    #[doc = " Events related to ACK processing"]
+    #[deprecated(note = "use on_rx_ack_range_dropped event instead")]
+    #[allow(deprecated)]
+    pub struct AckProcessed<'a> {
+        pub action: AckAction,
+        pub path: Path<'a>,
+    }
+    #[allow(deprecated)]
+    impl<'a> Event for AckProcessed<'a> {
+        const NAME: &'static str = "recovery:ack_processed";
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    #[doc = " Ack range for received packets was dropped due to space constraints"]
+    #[doc = ""]
+    #[doc = " For the purpose of processing Acks, RX packet numbers are stored as"]
+    #[doc = " packet_number ranges in an IntervalSet; only lower and upper bounds"]
+    #[doc = " are stored instead of individual packet_numbers. Ranges are merged"]
+    #[doc = " when possible so only disjointed ranges are stored."]
+    #[doc = ""]
+    #[doc = " When at `capacity`, the lowest packet_number range is dropped."]
+    pub struct RxAckRangeDropped<'a> {
+        pub path: Path<'a>,
+        #[doc = " The packet number range which was dropped"]
+        pub packet_number_range: core::ops::RangeInclusive<u64>,
+        #[doc = " The number of disjoint ranges the IntervalSet can store"]
+        pub capacity: usize,
+        #[doc = " The store packet_number range in the IntervalSet"]
+        pub stored_range: core::ops::RangeInclusive<u64>,
+    }
+    impl<'a> Event for RxAckRangeDropped<'a> {
+        const NAME: &'static str = "recovery:rx_ack_range_dropped";
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    #[doc = " ACK range was received"]
+    pub struct AckRangeReceived<'a> {
+        pub packet_header: PacketHeader,
+        pub path: Path<'a>,
+        pub ack_range: RangeInclusive<u64>,
+    }
+    impl<'a> Event for AckRangeReceived<'a> {
+        const NAME: &'static str = "recovery:ack_range_received";
     }
     #[derive(Clone, Debug)]
     #[non_exhaustive]
@@ -717,6 +895,62 @@ pub mod api {
     }
     #[derive(Clone, Debug)]
     #[non_exhaustive]
+    #[doc = " The maximum transmission unit (MTU) for the path has changed"]
+    pub struct MtuUpdated {
+        pub path_id: u64,
+        pub mtu: u16,
+        pub cause: MtuUpdatedCause,
+    }
+    impl Event for MtuUpdated {
+        const NAME: &'static str = "connectivity:mtu_updated";
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    #[doc = " The slow start congestion controller state has been exited"]
+    pub struct SlowStartExited {
+        pub path_id: u64,
+        pub cause: SlowStartExitCause,
+        pub congestion_window: u32,
+    }
+    impl Event for SlowStartExited {
+        const NAME: &'static str = "recovery:slow_start_exited";
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    #[doc = " A new delivery rate sample has been generated"]
+    #[doc = " Note: This event is only recorded for congestion controllers that support"]
+    #[doc = "       bandwidth estimates, such as BBR"]
+    pub struct DeliveryRateSampled {
+        pub path_id: u64,
+        pub rate_sample: RateSample,
+    }
+    impl Event for DeliveryRateSampled {
+        const NAME: &'static str = "recovery:delivery_rate_sampled";
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    #[doc = " The pacing rate has been updated"]
+    pub struct PacingRateUpdated {
+        pub path_id: u64,
+        pub bytes_per_second: u64,
+        pub burst_size: u32,
+        pub pacing_gain: f32,
+    }
+    impl Event for PacingRateUpdated {
+        const NAME: &'static str = "recovery:pacing_rate_updated";
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    #[doc = " The BBR state has changed"]
+    pub struct BbrStateChanged {
+        pub path_id: u64,
+        pub state: BbrState,
+    }
+    impl Event for BbrStateChanged {
+        const NAME: &'static str = "recovery:bbr_state_changed";
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
     #[doc = " QUIC version"]
     pub struct VersionInformation<'a> {
         pub server_versions: &'a [u32],
@@ -846,6 +1080,17 @@ pub mod api {
     }
     impl Event for PlatformEventLoopWakeup {
         const NAME: &'static str = "platform:event_loop_wakeup";
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
+    pub struct PlatformEventLoopSleep {
+        #[doc = " The next time at which the event loop will wake"]
+        pub timeout: Option<core::time::Duration>,
+        #[doc = " The amount of time spent processing endpoint events in a single event loop"]
+        pub processing_duration: core::time::Duration,
+    }
+    impl Event for PlatformEventLoopSleep {
+        const NAME: &'static str = "platform:event_loop_sleep";
     }
     #[derive(Clone, Debug)]
     #[non_exhaustive]
@@ -1043,6 +1288,15 @@ pub mod api {
             }
         }
     }
+    impl IntoEvent<builder::EcnCounts> for crate::frame::ack::EcnCounts {
+        fn into_event(self) -> builder::EcnCounts {
+            builder::EcnCounts {
+                ect_0_count: self.ect_0_count.into_event(),
+                ect_1_count: self.ect_1_count.into_event(),
+                ce_count: self.ce_count.into_event(),
+            }
+        }
+    }
     impl IntoEvent<builder::Frame> for &crate::frame::Padding {
         fn into_event(self) -> builder::Frame {
             builder::Frame::Padding {}
@@ -1053,19 +1307,32 @@ pub mod api {
             builder::Frame::Ping {}
         }
     }
-    impl<AckRanges> IntoEvent<builder::Frame> for &crate::frame::Ack<AckRanges> {
+    impl<AckRanges: crate::frame::ack::AckRanges> IntoEvent<builder::Frame>
+        for &crate::frame::Ack<AckRanges>
+    {
         fn into_event(self) -> builder::Frame {
-            builder::Frame::Ack {}
+            builder::Frame::Ack {
+                ecn_counts: self.ecn_counts.map(|val| val.into_event()),
+                largest_acknowledged: self.largest_acknowledged().into_event(),
+                ack_range_count: self.ack_ranges().len() as u64,
+            }
         }
     }
     impl IntoEvent<builder::Frame> for &crate::frame::ResetStream {
         fn into_event(self) -> builder::Frame {
-            builder::Frame::ResetStream {}
+            builder::Frame::ResetStream {
+                id: self.stream_id.as_u64(),
+                error_code: self.application_error_code.as_u64(),
+                final_size: self.final_size.as_u64(),
+            }
         }
     }
     impl IntoEvent<builder::Frame> for &crate::frame::StopSending {
         fn into_event(self) -> builder::Frame {
-            builder::Frame::ResetStream {}
+            builder::Frame::StopSending {
+                id: self.stream_id.as_u64(),
+                error_code: self.application_error_code.as_u64(),
+            }
         }
     }
     impl<'a> IntoEvent<builder::Frame> for &crate::frame::NewToken<'a> {
@@ -1075,35 +1342,50 @@ pub mod api {
     }
     impl IntoEvent<builder::Frame> for &crate::frame::MaxData {
         fn into_event(self) -> builder::Frame {
-            builder::Frame::MaxData {}
+            builder::Frame::MaxData {
+                value: self.maximum_data.as_u64(),
+            }
         }
     }
     impl IntoEvent<builder::Frame> for &crate::frame::MaxStreamData {
         fn into_event(self) -> builder::Frame {
-            builder::Frame::MaxStreamData {}
+            builder::Frame::MaxStreamData {
+                id: self.stream_id.as_u64(),
+                stream_type: crate::stream::StreamId::from_varint(self.stream_id)
+                    .stream_type()
+                    .into_event(),
+                value: self.maximum_stream_data.as_u64(),
+            }
         }
     }
     impl IntoEvent<builder::Frame> for &crate::frame::MaxStreams {
         fn into_event(self) -> builder::Frame {
             builder::Frame::MaxStreams {
                 stream_type: self.stream_type.into_event(),
+                value: self.maximum_streams.as_u64(),
             }
         }
     }
     impl IntoEvent<builder::Frame> for &crate::frame::DataBlocked {
         fn into_event(self) -> builder::Frame {
-            builder::Frame::DataBlocked {}
+            builder::Frame::DataBlocked {
+                data_limit: self.data_limit.as_u64(),
+            }
         }
     }
     impl IntoEvent<builder::Frame> for &crate::frame::StreamDataBlocked {
         fn into_event(self) -> builder::Frame {
-            builder::Frame::StreamDataBlocked {}
+            builder::Frame::StreamDataBlocked {
+                stream_id: self.stream_id.as_u64(),
+                stream_data_limit: self.stream_data_limit.as_u64(),
+            }
         }
     }
     impl IntoEvent<builder::Frame> for &crate::frame::StreamsBlocked {
         fn into_event(self) -> builder::Frame {
             builder::Frame::StreamsBlocked {
                 stream_type: self.stream_type.into_event(),
+                stream_limit: self.stream_limit.as_u64(),
             }
         }
     }
@@ -1171,7 +1453,7 @@ pub mod api {
             }
         }
     }
-    impl<'a> IntoEvent<builder::StreamType> for &crate::stream::StreamType {
+    impl IntoEvent<builder::StreamType> for &crate::stream::StreamType {
         fn into_event(self) -> builder::StreamType {
             match self {
                 crate::stream::StreamType::Bidirectional => builder::StreamType::Bidirectional {},
@@ -1188,15 +1470,15 @@ pub mod api {
             use builder::PacketHeader;
             match packet_number.space() {
                 PacketNumberSpace::Initial => PacketHeader::Initial {
-                    number: packet_number.as_u64(),
+                    number: packet_number.into_event(),
                     version,
                 },
                 PacketNumberSpace::Handshake => PacketHeader::Handshake {
-                    number: packet_number.as_u64(),
+                    number: packet_number.into_event(),
                     version,
                 },
                 PacketNumberSpace::ApplicationData => PacketHeader::OneRtt {
-                    number: packet_number.as_u64(),
+                    number: packet_number.into_event(),
                 },
             }
         }
@@ -1414,8 +1696,9 @@ pub mod tracing {
                 pto_count,
                 congestion_window,
                 bytes_in_flight,
+                congestion_limited,
             } = event;
-            tracing :: event ! (target : "recovery_metrics" , parent : id , tracing :: Level :: DEBUG , path = tracing :: field :: debug (path) , min_rtt = tracing :: field :: debug (min_rtt) , smoothed_rtt = tracing :: field :: debug (smoothed_rtt) , latest_rtt = tracing :: field :: debug (latest_rtt) , rtt_variance = tracing :: field :: debug (rtt_variance) , max_ack_delay = tracing :: field :: debug (max_ack_delay) , pto_count = tracing :: field :: debug (pto_count) , congestion_window = tracing :: field :: debug (congestion_window) , bytes_in_flight = tracing :: field :: debug (bytes_in_flight));
+            tracing :: event ! (target : "recovery_metrics" , parent : id , tracing :: Level :: DEBUG , path = tracing :: field :: debug (path) , min_rtt = tracing :: field :: debug (min_rtt) , smoothed_rtt = tracing :: field :: debug (smoothed_rtt) , latest_rtt = tracing :: field :: debug (latest_rtt) , rtt_variance = tracing :: field :: debug (rtt_variance) , max_ack_delay = tracing :: field :: debug (max_ack_delay) , pto_count = tracing :: field :: debug (pto_count) , congestion_window = tracing :: field :: debug (congestion_window) , bytes_in_flight = tracing :: field :: debug (bytes_in_flight) , congestion_limited = tracing :: field :: debug (congestion_limited));
         }
         #[inline]
         fn on_congestion(
@@ -1427,6 +1710,49 @@ pub mod tracing {
             let id = context.id();
             let api::Congestion { path, source } = event;
             tracing :: event ! (target : "congestion" , parent : id , tracing :: Level :: DEBUG , path = tracing :: field :: debug (path) , source = tracing :: field :: debug (source));
+        }
+        #[inline]
+        #[allow(deprecated)]
+        fn on_ack_processed(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            _meta: &api::ConnectionMeta,
+            event: &api::AckProcessed,
+        ) {
+            let id = context.id();
+            let api::AckProcessed { action, path } = event;
+            tracing :: event ! (target : "ack_processed" , parent : id , tracing :: Level :: DEBUG , action = tracing :: field :: debug (action) , path = tracing :: field :: debug (path));
+        }
+        #[inline]
+        fn on_rx_ack_range_dropped(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            _meta: &api::ConnectionMeta,
+            event: &api::RxAckRangeDropped,
+        ) {
+            let id = context.id();
+            let api::RxAckRangeDropped {
+                path,
+                packet_number_range,
+                capacity,
+                stored_range,
+            } = event;
+            tracing :: event ! (target : "rx_ack_range_dropped" , parent : id , tracing :: Level :: DEBUG , path = tracing :: field :: debug (path) , packet_number_range = tracing :: field :: debug (packet_number_range) , capacity = tracing :: field :: debug (capacity) , stored_range = tracing :: field :: debug (stored_range));
+        }
+        #[inline]
+        fn on_ack_range_received(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            _meta: &api::ConnectionMeta,
+            event: &api::AckRangeReceived,
+        ) {
+            let id = context.id();
+            let api::AckRangeReceived {
+                packet_header,
+                path,
+                ack_range,
+            } = event;
+            tracing :: event ! (target : "ack_range_received" , parent : id , tracing :: Level :: DEBUG , packet_header = tracing :: field :: debug (packet_header) , path = tracing :: field :: debug (path) , ack_range = tracing :: field :: debug (ack_range));
         }
         #[inline]
         fn on_packet_dropped(
@@ -1667,6 +1993,77 @@ pub mod tracing {
             tracing :: event ! (target : "keep_alive_timer_expired" , parent : id , tracing :: Level :: DEBUG , timeout = tracing :: field :: debug (timeout));
         }
         #[inline]
+        fn on_mtu_updated(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            _meta: &api::ConnectionMeta,
+            event: &api::MtuUpdated,
+        ) {
+            let id = context.id();
+            let api::MtuUpdated {
+                path_id,
+                mtu,
+                cause,
+            } = event;
+            tracing :: event ! (target : "mtu_updated" , parent : id , tracing :: Level :: DEBUG , path_id = tracing :: field :: debug (path_id) , mtu = tracing :: field :: debug (mtu) , cause = tracing :: field :: debug (cause));
+        }
+        #[inline]
+        fn on_slow_start_exited(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            _meta: &api::ConnectionMeta,
+            event: &api::SlowStartExited,
+        ) {
+            let id = context.id();
+            let api::SlowStartExited {
+                path_id,
+                cause,
+                congestion_window,
+            } = event;
+            tracing :: event ! (target : "slow_start_exited" , parent : id , tracing :: Level :: DEBUG , path_id = tracing :: field :: debug (path_id) , cause = tracing :: field :: debug (cause) , congestion_window = tracing :: field :: debug (congestion_window));
+        }
+        #[inline]
+        fn on_delivery_rate_sampled(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            _meta: &api::ConnectionMeta,
+            event: &api::DeliveryRateSampled,
+        ) {
+            let id = context.id();
+            let api::DeliveryRateSampled {
+                path_id,
+                rate_sample,
+            } = event;
+            tracing :: event ! (target : "delivery_rate_sampled" , parent : id , tracing :: Level :: DEBUG , path_id = tracing :: field :: debug (path_id) , rate_sample = tracing :: field :: debug (rate_sample));
+        }
+        #[inline]
+        fn on_pacing_rate_updated(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            _meta: &api::ConnectionMeta,
+            event: &api::PacingRateUpdated,
+        ) {
+            let id = context.id();
+            let api::PacingRateUpdated {
+                path_id,
+                bytes_per_second,
+                burst_size,
+                pacing_gain,
+            } = event;
+            tracing :: event ! (target : "pacing_rate_updated" , parent : id , tracing :: Level :: DEBUG , path_id = tracing :: field :: debug (path_id) , bytes_per_second = tracing :: field :: debug (bytes_per_second) , burst_size = tracing :: field :: debug (burst_size) , pacing_gain = tracing :: field :: debug (pacing_gain));
+        }
+        #[inline]
+        fn on_bbr_state_changed(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            _meta: &api::ConnectionMeta,
+            event: &api::BbrStateChanged,
+        ) {
+            let id = context.id();
+            let api::BbrStateChanged { path_id, state } = event;
+            tracing :: event ! (target : "bbr_state_changed" , parent : id , tracing :: Level :: DEBUG , path_id = tracing :: field :: debug (path_id) , state = tracing :: field :: debug (state));
+        }
+        #[inline]
         fn on_version_information(
             &mut self,
             meta: &api::EndpointMeta,
@@ -1828,6 +2225,22 @@ pub mod tracing {
             } = event;
             tracing :: event ! (target : "platform_event_loop_wakeup" , parent : parent , tracing :: Level :: DEBUG , timeout_expired = tracing :: field :: debug (timeout_expired) , rx_ready = tracing :: field :: debug (rx_ready) , tx_ready = tracing :: field :: debug (tx_ready) , application_wakeup = tracing :: field :: debug (application_wakeup));
         }
+        #[inline]
+        fn on_platform_event_loop_sleep(
+            &mut self,
+            meta: &api::EndpointMeta,
+            event: &api::PlatformEventLoopSleep,
+        ) {
+            let parent = match meta.endpoint_type {
+                api::EndpointType::Client {} => self.client.id(),
+                api::EndpointType::Server {} => self.server.id(),
+            };
+            let api::PlatformEventLoopSleep {
+                timeout,
+                processing_duration,
+            } = event;
+            tracing :: event ! (target : "platform_event_loop_sleep" , parent : parent , tracing :: Level :: DEBUG , timeout = tracing :: field :: debug (timeout) , processing_duration = tracing :: field :: debug (processing_duration));
+        }
     }
 }
 pub mod builder {
@@ -1968,7 +2381,7 @@ pub mod builder {
             }
         }
     }
-    #[derive(Clone, Debug)]
+    #[derive(Copy, Clone, Debug)]
     pub struct Path<'a> {
         pub local_addr: SocketAddress<'a>,
         pub local_cid: ConnectionId<'a>,
@@ -1998,7 +2411,7 @@ pub mod builder {
             }
         }
     }
-    #[derive(Clone, Debug)]
+    #[derive(Copy, Clone, Debug)]
     pub struct ConnectionId<'a> {
         pub bytes: &'a [u8],
     }
@@ -2012,6 +2425,86 @@ pub mod builder {
         }
     }
     #[derive(Clone, Debug)]
+    pub struct EcnCounts {
+        #[doc = " A variable-length integer representing the total number of packets"]
+        #[doc = " received with the ECT(0) codepoint."]
+        pub ect_0_count: u64,
+        #[doc = " A variable-length integer representing the total number of packets"]
+        #[doc = " received with the ECT(1) codepoint."]
+        pub ect_1_count: u64,
+        #[doc = " A variable-length integer representing the total number of packets"]
+        #[doc = " received with the CE codepoint."]
+        pub ce_count: u64,
+    }
+    impl IntoEvent<api::EcnCounts> for EcnCounts {
+        #[inline]
+        fn into_event(self) -> api::EcnCounts {
+            let EcnCounts {
+                ect_0_count,
+                ect_1_count,
+                ce_count,
+            } = self;
+            api::EcnCounts {
+                ect_0_count: ect_0_count.into_event(),
+                ect_1_count: ect_1_count.into_event(),
+                ce_count: ce_count.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[doc = " A bandwidth delivery rate estimate with associated metadata"]
+    pub struct RateSample {
+        #[doc = " The length of the sampling interval"]
+        pub interval: Duration,
+        #[doc = " The amount of data in bytes marked as delivered over the sampling interval"]
+        pub delivered_bytes: u64,
+        #[doc = " The amount of data in bytes marked as lost over the sampling interval"]
+        pub lost_bytes: u64,
+        #[doc = " The number of packets marked as explicit congestion experienced over the sampling interval"]
+        pub ecn_ce_count: u64,
+        #[doc = " PacketInfo::is_app_limited from the most recent acknowledged packet"]
+        pub is_app_limited: bool,
+        #[doc = " PacketInfo::delivered_bytes from the most recent acknowledged packet"]
+        pub prior_delivered_bytes: u64,
+        #[doc = " PacketInfo::bytes_in_flight from the most recent acknowledged packet"]
+        pub bytes_in_flight: u32,
+        #[doc = " PacketInfo::lost_bytes from the most recent acknowledged packet"]
+        pub prior_lost_bytes: u64,
+        #[doc = " PacketInfo::ecn_ce_count from the most recent acknowledged packet"]
+        pub prior_ecn_ce_count: u64,
+        #[doc = " The delivery rate for this rate sample"]
+        pub delivery_rate_bytes_per_second: u64,
+    }
+    impl IntoEvent<api::RateSample> for RateSample {
+        #[inline]
+        fn into_event(self) -> api::RateSample {
+            let RateSample {
+                interval,
+                delivered_bytes,
+                lost_bytes,
+                ecn_ce_count,
+                is_app_limited,
+                prior_delivered_bytes,
+                bytes_in_flight,
+                prior_lost_bytes,
+                prior_ecn_ce_count,
+                delivery_rate_bytes_per_second,
+            } = self;
+            api::RateSample {
+                interval: interval.into_event(),
+                delivered_bytes: delivered_bytes.into_event(),
+                lost_bytes: lost_bytes.into_event(),
+                ecn_ce_count: ecn_ce_count.into_event(),
+                is_app_limited: is_app_limited.into_event(),
+                prior_delivered_bytes: prior_delivered_bytes.into_event(),
+                bytes_in_flight: bytes_in_flight.into_event(),
+                prior_lost_bytes: prior_lost_bytes.into_event(),
+                prior_ecn_ce_count: prior_ecn_ce_count.into_event(),
+                delivery_rate_bytes_per_second: delivery_rate_bytes_per_second.into_event(),
+            }
+        }
+    }
+    #[derive(Copy, Clone, Debug)]
     pub enum SocketAddress<'a> {
         IpV4 { ip: &'a [u8; 4], port: u16 },
         IpV6 { ip: &'a [u8; 16], port: u16 },
@@ -2058,9 +2551,20 @@ pub mod builder {
     pub enum Frame {
         Padding,
         Ping,
-        Ack,
-        ResetStream,
-        StopSending,
+        Ack {
+            ecn_counts: Option<EcnCounts>,
+            largest_acknowledged: u64,
+            ack_range_count: u64,
+        },
+        ResetStream {
+            id: u64,
+            error_code: u64,
+            final_size: u64,
+        },
+        StopSending {
+            id: u64,
+            error_code: u64,
+        },
         Crypto {
             offset: u64,
             len: u16,
@@ -2072,15 +2576,28 @@ pub mod builder {
             len: u16,
             is_fin: bool,
         },
-        MaxData,
-        MaxStreamData,
+        MaxData {
+            value: u64,
+        },
+        MaxStreamData {
+            stream_type: StreamType,
+            id: u64,
+            value: u64,
+        },
         MaxStreams {
             stream_type: StreamType,
+            value: u64,
         },
-        DataBlocked,
-        StreamDataBlocked,
+        DataBlocked {
+            data_limit: u64,
+        },
+        StreamDataBlocked {
+            stream_id: u64,
+            stream_data_limit: u64,
+        },
         StreamsBlocked {
             stream_type: StreamType,
+            stream_limit: u64,
         },
         NewConnectionId,
         RetireConnectionId,
@@ -2099,9 +2616,28 @@ pub mod builder {
             match self {
                 Self::Padding => Padding {},
                 Self::Ping => Ping {},
-                Self::Ack => Ack {},
-                Self::ResetStream => ResetStream {},
-                Self::StopSending => StopSending {},
+                Self::Ack {
+                    ecn_counts,
+                    largest_acknowledged,
+                    ack_range_count,
+                } => Ack {
+                    ecn_counts: ecn_counts.into_event(),
+                    largest_acknowledged: largest_acknowledged.into_event(),
+                    ack_range_count: ack_range_count.into_event(),
+                },
+                Self::ResetStream {
+                    id,
+                    error_code,
+                    final_size,
+                } => ResetStream {
+                    id: id.into_event(),
+                    error_code: error_code.into_event(),
+                    final_size: final_size.into_event(),
+                },
+                Self::StopSending { id, error_code } => StopSending {
+                    id: id.into_event(),
+                    error_code: error_code.into_event(),
+                },
                 Self::Crypto { offset, len } => Crypto {
                     offset: offset.into_event(),
                     len: len.into_event(),
@@ -2118,15 +2654,38 @@ pub mod builder {
                     len: len.into_event(),
                     is_fin: is_fin.into_event(),
                 },
-                Self::MaxData => MaxData {},
-                Self::MaxStreamData => MaxStreamData {},
-                Self::MaxStreams { stream_type } => MaxStreams {
-                    stream_type: stream_type.into_event(),
+                Self::MaxData { value } => MaxData {
+                    value: value.into_event(),
                 },
-                Self::DataBlocked => DataBlocked {},
-                Self::StreamDataBlocked => StreamDataBlocked {},
-                Self::StreamsBlocked { stream_type } => StreamsBlocked {
+                Self::MaxStreamData {
+                    stream_type,
+                    id,
+                    value,
+                } => MaxStreamData {
                     stream_type: stream_type.into_event(),
+                    id: id.into_event(),
+                    value: value.into_event(),
+                },
+                Self::MaxStreams { stream_type, value } => MaxStreams {
+                    stream_type: stream_type.into_event(),
+                    value: value.into_event(),
+                },
+                Self::DataBlocked { data_limit } => DataBlocked {
+                    data_limit: data_limit.into_event(),
+                },
+                Self::StreamDataBlocked {
+                    stream_id,
+                    stream_data_limit,
+                } => StreamDataBlocked {
+                    stream_id: stream_id.into_event(),
+                    stream_data_limit: stream_data_limit.into_event(),
+                },
+                Self::StreamsBlocked {
+                    stream_type,
+                    stream_limit,
+                } => StreamsBlocked {
+                    stream_type: stream_type.into_event(),
+                    stream_limit: stream_limit.into_event(),
                 },
                 Self::NewConnectionId => NewConnectionId {},
                 Self::RetireConnectionId => RetireConnectionId {},
@@ -2406,6 +2965,43 @@ pub mod builder {
         }
     }
     #[derive(Clone, Debug)]
+    pub enum AckAction {
+        #[doc = " Ack range for received packets was dropped due to space constraints"]
+        #[doc = ""]
+        #[doc = " For the purpose of processing Acks, RX packet numbers are stored as"]
+        #[doc = " packet_number ranges in an IntervalSet; only lower and upper bounds"]
+        #[doc = " are stored instead of individual packet_numbers. Ranges are merged"]
+        #[doc = " when possible so only disjointed ranges are stored."]
+        #[doc = ""]
+        #[doc = " When at `capacity`, the lowest packet_number range is dropped."]
+        RxAckRangeDropped {
+            #[doc = " The packet number range which was dropped"]
+            packet_number_range: core::ops::RangeInclusive<u64>,
+            #[doc = " The number of disjoint ranges the IntervalSet can store"]
+            capacity: usize,
+            #[doc = " The store packet_number range in the IntervalSet"]
+            stored_range: core::ops::RangeInclusive<u64>,
+        },
+    }
+    #[allow(deprecated)]
+    impl IntoEvent<api::AckAction> for AckAction {
+        #[inline]
+        fn into_event(self) -> api::AckAction {
+            use api::AckAction::*;
+            match self {
+                Self::RxAckRangeDropped {
+                    packet_number_range,
+                    capacity,
+                    stored_range,
+                } => RxAckRangeDropped {
+                    packet_number_range: packet_number_range.into_event(),
+                    capacity: capacity.into_event(),
+                    stored_range: stored_range.into_event(),
+                },
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
     pub enum RetryDiscardReason<'a> {
         #[doc = " Received a Retry packet with SCID field equal to DCID field."]
         ScidEqualsDcid { cid: &'a [u8] },
@@ -2555,6 +3151,80 @@ pub mod builder {
             match self {
                 Self::Validated => Validated {},
                 Self::Abandoned => Abandoned {},
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[doc = " The reason the slow start congestion controller state has been exited"]
+    pub enum SlowStartExitCause {
+        #[doc = " A packet was determined lost"]
+        PacketLoss,
+        #[doc = " An Explicit Congestion Notification: Congestion Experienced marking was received"]
+        Ecn,
+        #[doc = " The round trip time estimate was updated"]
+        Rtt,
+        #[doc = " Slow Start exited due to a reason other than those above"]
+        #[doc = ""]
+        #[doc = " With the Cubic congestion controller, this reason is used after the initial exiting of"]
+        #[doc = " Slow Start, when the previously determined Slow Start threshold is exceed by the"]
+        #[doc = " congestion window."]
+        Other,
+    }
+    impl IntoEvent<api::SlowStartExitCause> for SlowStartExitCause {
+        #[inline]
+        fn into_event(self) -> api::SlowStartExitCause {
+            use api::SlowStartExitCause::*;
+            match self {
+                Self::PacketLoss => PacketLoss {},
+                Self::Ecn => Ecn {},
+                Self::Rtt => Rtt {},
+                Self::Other => Other {},
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[doc = " The reason the MTU was updated"]
+    pub enum MtuUpdatedCause {
+        #[doc = " The MTU was initialized with the default value"]
+        NewPath,
+        #[doc = " An MTU probe was acknowledged by the peer"]
+        ProbeAcknowledged,
+        #[doc = " A blackhole was detected"]
+        Blackhole,
+    }
+    impl IntoEvent<api::MtuUpdatedCause> for MtuUpdatedCause {
+        #[inline]
+        fn into_event(self) -> api::MtuUpdatedCause {
+            use api::MtuUpdatedCause::*;
+            match self {
+                Self::NewPath => NewPath {},
+                Self::ProbeAcknowledged => ProbeAcknowledged {},
+                Self::Blackhole => Blackhole {},
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    pub enum BbrState {
+        Startup,
+        Drain,
+        ProbeBwDown,
+        ProbeBwCruise,
+        ProbeBwRefill,
+        ProbeBwUp,
+        ProbeRtt,
+    }
+    impl IntoEvent<api::BbrState> for BbrState {
+        #[inline]
+        fn into_event(self) -> api::BbrState {
+            use api::BbrState::*;
+            match self {
+                Self::Startup => Startup {},
+                Self::Drain => Drain {},
+                Self::ProbeBwDown => ProbeBwDown {},
+                Self::ProbeBwCruise => ProbeBwCruise {},
+                Self::ProbeBwRefill => ProbeBwRefill {},
+                Self::ProbeBwUp => ProbeBwUp {},
+                Self::ProbeRtt => ProbeRtt {},
             }
         }
     }
@@ -2729,6 +3399,7 @@ pub mod builder {
         pub pto_count: u32,
         pub congestion_window: u32,
         pub bytes_in_flight: u32,
+        pub congestion_limited: bool,
     }
     impl<'a> IntoEvent<api::RecoveryMetrics<'a>> for RecoveryMetrics<'a> {
         #[inline]
@@ -2743,6 +3414,7 @@ pub mod builder {
                 pto_count,
                 congestion_window,
                 bytes_in_flight,
+                congestion_limited,
             } = self;
             api::RecoveryMetrics {
                 path: path.into_event(),
@@ -2754,6 +3426,7 @@ pub mod builder {
                 pto_count: pto_count.into_event(),
                 congestion_window: congestion_window.into_event(),
                 bytes_in_flight: bytes_in_flight.into_event(),
+                congestion_limited: congestion_limited.into_event(),
             }
         }
     }
@@ -2770,6 +3443,80 @@ pub mod builder {
             api::Congestion {
                 path: path.into_event(),
                 source: source.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[doc = " Events related to ACK processing"]
+    pub struct AckProcessed<'a> {
+        pub action: AckAction,
+        pub path: Path<'a>,
+    }
+    #[allow(deprecated)]
+    impl<'a> IntoEvent<api::AckProcessed<'a>> for AckProcessed<'a> {
+        #[inline]
+        fn into_event(self) -> api::AckProcessed<'a> {
+            let AckProcessed { action, path } = self;
+            api::AckProcessed {
+                action: action.into_event(),
+                path: path.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[doc = " Ack range for received packets was dropped due to space constraints"]
+    #[doc = ""]
+    #[doc = " For the purpose of processing Acks, RX packet numbers are stored as"]
+    #[doc = " packet_number ranges in an IntervalSet; only lower and upper bounds"]
+    #[doc = " are stored instead of individual packet_numbers. Ranges are merged"]
+    #[doc = " when possible so only disjointed ranges are stored."]
+    #[doc = ""]
+    #[doc = " When at `capacity`, the lowest packet_number range is dropped."]
+    pub struct RxAckRangeDropped<'a> {
+        pub path: Path<'a>,
+        #[doc = " The packet number range which was dropped"]
+        pub packet_number_range: core::ops::RangeInclusive<u64>,
+        #[doc = " The number of disjoint ranges the IntervalSet can store"]
+        pub capacity: usize,
+        #[doc = " The store packet_number range in the IntervalSet"]
+        pub stored_range: core::ops::RangeInclusive<u64>,
+    }
+    impl<'a> IntoEvent<api::RxAckRangeDropped<'a>> for RxAckRangeDropped<'a> {
+        #[inline]
+        fn into_event(self) -> api::RxAckRangeDropped<'a> {
+            let RxAckRangeDropped {
+                path,
+                packet_number_range,
+                capacity,
+                stored_range,
+            } = self;
+            api::RxAckRangeDropped {
+                path: path.into_event(),
+                packet_number_range: packet_number_range.into_event(),
+                capacity: capacity.into_event(),
+                stored_range: stored_range.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[doc = " ACK range was received"]
+    pub struct AckRangeReceived<'a> {
+        pub packet_header: PacketHeader,
+        pub path: Path<'a>,
+        pub ack_range: RangeInclusive<u64>,
+    }
+    impl<'a> IntoEvent<api::AckRangeReceived<'a>> for AckRangeReceived<'a> {
+        #[inline]
+        fn into_event(self) -> api::AckRangeReceived<'a> {
+            let AckRangeReceived {
+                packet_header,
+                path,
+                ack_range,
+            } = self;
+            api::AckRangeReceived {
+                packet_header: packet_header.into_event(),
+                path: path.into_event(),
+                ack_range: ack_range.into_event(),
             }
         }
     }
@@ -3092,6 +3839,112 @@ pub mod builder {
         }
     }
     #[derive(Clone, Debug)]
+    #[doc = " The maximum transmission unit (MTU) for the path has changed"]
+    pub struct MtuUpdated {
+        pub path_id: u64,
+        pub mtu: u16,
+        pub cause: MtuUpdatedCause,
+    }
+    impl IntoEvent<api::MtuUpdated> for MtuUpdated {
+        #[inline]
+        fn into_event(self) -> api::MtuUpdated {
+            let MtuUpdated {
+                path_id,
+                mtu,
+                cause,
+            } = self;
+            api::MtuUpdated {
+                path_id: path_id.into_event(),
+                mtu: mtu.into_event(),
+                cause: cause.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[doc = " The slow start congestion controller state has been exited"]
+    pub struct SlowStartExited {
+        pub path_id: u64,
+        pub cause: SlowStartExitCause,
+        pub congestion_window: u32,
+    }
+    impl IntoEvent<api::SlowStartExited> for SlowStartExited {
+        #[inline]
+        fn into_event(self) -> api::SlowStartExited {
+            let SlowStartExited {
+                path_id,
+                cause,
+                congestion_window,
+            } = self;
+            api::SlowStartExited {
+                path_id: path_id.into_event(),
+                cause: cause.into_event(),
+                congestion_window: congestion_window.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[doc = " A new delivery rate sample has been generated"]
+    #[doc = " Note: This event is only recorded for congestion controllers that support"]
+    #[doc = "       bandwidth estimates, such as BBR"]
+    pub struct DeliveryRateSampled {
+        pub path_id: u64,
+        pub rate_sample: RateSample,
+    }
+    impl IntoEvent<api::DeliveryRateSampled> for DeliveryRateSampled {
+        #[inline]
+        fn into_event(self) -> api::DeliveryRateSampled {
+            let DeliveryRateSampled {
+                path_id,
+                rate_sample,
+            } = self;
+            api::DeliveryRateSampled {
+                path_id: path_id.into_event(),
+                rate_sample: rate_sample.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[doc = " The pacing rate has been updated"]
+    pub struct PacingRateUpdated {
+        pub path_id: u64,
+        pub bytes_per_second: u64,
+        pub burst_size: u32,
+        pub pacing_gain: f32,
+    }
+    impl IntoEvent<api::PacingRateUpdated> for PacingRateUpdated {
+        #[inline]
+        fn into_event(self) -> api::PacingRateUpdated {
+            let PacingRateUpdated {
+                path_id,
+                bytes_per_second,
+                burst_size,
+                pacing_gain,
+            } = self;
+            api::PacingRateUpdated {
+                path_id: path_id.into_event(),
+                bytes_per_second: bytes_per_second.into_event(),
+                burst_size: burst_size.into_event(),
+                pacing_gain: pacing_gain.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[doc = " The BBR state has changed"]
+    pub struct BbrStateChanged {
+        pub path_id: u64,
+        pub state: BbrState,
+    }
+    impl IntoEvent<api::BbrStateChanged> for BbrStateChanged {
+        #[inline]
+        fn into_event(self) -> api::BbrStateChanged {
+            let BbrStateChanged { path_id, state } = self;
+            api::BbrStateChanged {
+                path_id: path_id.into_event(),
+                state: state.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
     #[doc = " QUIC version"]
     pub struct VersionInformation<'a> {
         pub server_versions: &'a [u32],
@@ -3305,6 +4158,26 @@ pub mod builder {
         }
     }
     #[derive(Clone, Debug)]
+    pub struct PlatformEventLoopSleep {
+        #[doc = " The next time at which the event loop will wake"]
+        pub timeout: Option<core::time::Duration>,
+        #[doc = " The amount of time spent processing endpoint events in a single event loop"]
+        pub processing_duration: core::time::Duration,
+    }
+    impl IntoEvent<api::PlatformEventLoopSleep> for PlatformEventLoopSleep {
+        #[inline]
+        fn into_event(self) -> api::PlatformEventLoopSleep {
+            let PlatformEventLoopSleep {
+                timeout,
+                processing_duration,
+            } = self;
+            api::PlatformEventLoopSleep {
+                timeout: timeout.into_event(),
+                processing_duration: processing_duration.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
     pub enum PlatformFeatureConfiguration {
         #[doc = " Emitted when segment offload was configured"]
         Gso {
@@ -3391,6 +4264,7 @@ pub mod supervisor {
 pub use traits::*;
 mod traits {
     use super::*;
+    use crate::query;
     use api::*;
     use core::fmt;
     #[doc = r" Provides metadata related to an event"]
@@ -3643,6 +4517,44 @@ mod traits {
             let _ = meta;
             let _ = event;
         }
+        #[doc = "Called when the `AckProcessed` event is triggered"]
+        #[inline]
+        #[deprecated(note = "use on_rx_ack_range_dropped event instead")]
+        #[allow(deprecated)]
+        fn on_ack_processed(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &AckProcessed,
+        ) {
+            let _ = context;
+            let _ = meta;
+            let _ = event;
+        }
+        #[doc = "Called when the `RxAckRangeDropped` event is triggered"]
+        #[inline]
+        fn on_rx_ack_range_dropped(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &RxAckRangeDropped,
+        ) {
+            let _ = context;
+            let _ = meta;
+            let _ = event;
+        }
+        #[doc = "Called when the `AckRangeReceived` event is triggered"]
+        #[inline]
+        fn on_ack_range_received(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &AckRangeReceived,
+        ) {
+            let _ = context;
+            let _ = meta;
+            let _ = event;
+        }
         #[doc = "Called when the `PacketDropped` event is triggered"]
         #[inline]
         fn on_packet_dropped(
@@ -3883,6 +4795,66 @@ mod traits {
             let _ = meta;
             let _ = event;
         }
+        #[doc = "Called when the `MtuUpdated` event is triggered"]
+        #[inline]
+        fn on_mtu_updated(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &MtuUpdated,
+        ) {
+            let _ = context;
+            let _ = meta;
+            let _ = event;
+        }
+        #[doc = "Called when the `SlowStartExited` event is triggered"]
+        #[inline]
+        fn on_slow_start_exited(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &SlowStartExited,
+        ) {
+            let _ = context;
+            let _ = meta;
+            let _ = event;
+        }
+        #[doc = "Called when the `DeliveryRateSampled` event is triggered"]
+        #[inline]
+        fn on_delivery_rate_sampled(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &DeliveryRateSampled,
+        ) {
+            let _ = context;
+            let _ = meta;
+            let _ = event;
+        }
+        #[doc = "Called when the `PacingRateUpdated` event is triggered"]
+        #[inline]
+        fn on_pacing_rate_updated(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &PacingRateUpdated,
+        ) {
+            let _ = context;
+            let _ = meta;
+            let _ = event;
+        }
+        #[doc = "Called when the `BbrStateChanged` event is triggered"]
+        #[inline]
+        fn on_bbr_state_changed(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &BbrStateChanged,
+        ) {
+            let _ = context;
+            let _ = meta;
+            let _ = event;
+        }
         #[doc = "Called when the `VersionInformation` event is triggered"]
         #[inline]
         fn on_version_information(&mut self, meta: &EndpointMeta, event: &VersionInformation) {
@@ -3981,6 +4953,16 @@ mod traits {
             &mut self,
             meta: &EndpointMeta,
             event: &PlatformEventLoopWakeup,
+        ) {
+            let _ = meta;
+            let _ = event;
+        }
+        #[doc = "Called when the `PlatformEventLoopSleep` event is triggered"]
+        #[inline]
+        fn on_platform_event_loop_sleep(
+            &mut self,
+            meta: &EndpointMeta,
+            event: &PlatformEventLoopSleep,
         ) {
             let _ = meta;
             let _ = event;
@@ -4194,6 +5176,37 @@ mod traits {
             (self.1).on_congestion(&mut context.1, meta, event);
         }
         #[inline]
+        #[allow(deprecated)]
+        fn on_ack_processed(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &AckProcessed,
+        ) {
+            (self.0).on_ack_processed(&mut context.0, meta, event);
+            (self.1).on_ack_processed(&mut context.1, meta, event);
+        }
+        #[inline]
+        fn on_rx_ack_range_dropped(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &RxAckRangeDropped,
+        ) {
+            (self.0).on_rx_ack_range_dropped(&mut context.0, meta, event);
+            (self.1).on_rx_ack_range_dropped(&mut context.1, meta, event);
+        }
+        #[inline]
+        fn on_ack_range_received(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &AckRangeReceived,
+        ) {
+            (self.0).on_ack_range_received(&mut context.0, meta, event);
+            (self.1).on_ack_range_received(&mut context.1, meta, event);
+        }
+        #[inline]
         fn on_packet_dropped(
             &mut self,
             context: &mut Self::ConnectionContext,
@@ -4394,6 +5407,56 @@ mod traits {
             (self.1).on_keep_alive_timer_expired(&mut context.1, meta, event);
         }
         #[inline]
+        fn on_mtu_updated(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &MtuUpdated,
+        ) {
+            (self.0).on_mtu_updated(&mut context.0, meta, event);
+            (self.1).on_mtu_updated(&mut context.1, meta, event);
+        }
+        #[inline]
+        fn on_slow_start_exited(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &SlowStartExited,
+        ) {
+            (self.0).on_slow_start_exited(&mut context.0, meta, event);
+            (self.1).on_slow_start_exited(&mut context.1, meta, event);
+        }
+        #[inline]
+        fn on_delivery_rate_sampled(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &DeliveryRateSampled,
+        ) {
+            (self.0).on_delivery_rate_sampled(&mut context.0, meta, event);
+            (self.1).on_delivery_rate_sampled(&mut context.1, meta, event);
+        }
+        #[inline]
+        fn on_pacing_rate_updated(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &PacingRateUpdated,
+        ) {
+            (self.0).on_pacing_rate_updated(&mut context.0, meta, event);
+            (self.1).on_pacing_rate_updated(&mut context.1, meta, event);
+        }
+        #[inline]
+        fn on_bbr_state_changed(
+            &mut self,
+            context: &mut Self::ConnectionContext,
+            meta: &ConnectionMeta,
+            event: &BbrStateChanged,
+        ) {
+            (self.0).on_bbr_state_changed(&mut context.0, meta, event);
+            (self.1).on_bbr_state_changed(&mut context.1, meta, event);
+        }
+        #[inline]
         fn on_version_information(&mut self, meta: &EndpointMeta, event: &VersionInformation) {
             (self.0).on_version_information(meta, event);
             (self.1).on_version_information(meta, event);
@@ -4483,6 +5546,15 @@ mod traits {
             (self.1).on_platform_event_loop_wakeup(meta, event);
         }
         #[inline]
+        fn on_platform_event_loop_sleep(
+            &mut self,
+            meta: &EndpointMeta,
+            event: &PlatformEventLoopSleep,
+        ) {
+            (self.0).on_platform_event_loop_sleep(meta, event);
+            (self.1).on_platform_event_loop_sleep(meta, event);
+        }
+        #[inline]
         fn on_event<M: Meta, E: Event>(&mut self, meta: &M, event: &E) {
             self.0.on_event(meta, event);
             self.1.on_event(meta, event);
@@ -4548,6 +5620,8 @@ mod traits {
         fn on_platform_feature_configured(&mut self, event: builder::PlatformFeatureConfigured);
         #[doc = "Publishes a `PlatformEventLoopWakeup` event to the publisher's subscriber"]
         fn on_platform_event_loop_wakeup(&mut self, event: builder::PlatformEventLoopWakeup);
+        #[doc = "Publishes a `PlatformEventLoopSleep` event to the publisher's subscriber"]
+        fn on_platform_event_loop_sleep(&mut self, event: builder::PlatformEventLoopSleep);
         #[doc = r" Returns the QUIC version, if any"]
         fn quic_version(&self) -> Option<u32>;
     }
@@ -4668,6 +5742,13 @@ mod traits {
             self.subscriber.on_event(&self.meta, &event);
         }
         #[inline]
+        fn on_platform_event_loop_sleep(&mut self, event: builder::PlatformEventLoopSleep) {
+            let event = event.into_event();
+            self.subscriber
+                .on_platform_event_loop_sleep(&self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
         fn quic_version(&self) -> Option<u32> {
             self.quic_version
         }
@@ -4698,6 +5779,12 @@ mod traits {
         fn on_recovery_metrics(&mut self, event: builder::RecoveryMetrics);
         #[doc = "Publishes a `Congestion` event to the publisher's subscriber"]
         fn on_congestion(&mut self, event: builder::Congestion);
+        #[doc = "Publishes a `AckProcessed` event to the publisher's subscriber"]
+        fn on_ack_processed(&mut self, event: builder::AckProcessed);
+        #[doc = "Publishes a `RxAckRangeDropped` event to the publisher's subscriber"]
+        fn on_rx_ack_range_dropped(&mut self, event: builder::RxAckRangeDropped);
+        #[doc = "Publishes a `AckRangeReceived` event to the publisher's subscriber"]
+        fn on_ack_range_received(&mut self, event: builder::AckRangeReceived);
         #[doc = "Publishes a `PacketDropped` event to the publisher's subscriber"]
         fn on_packet_dropped(&mut self, event: builder::PacketDropped);
         #[doc = "Publishes a `KeyUpdate` event to the publisher's subscriber"]
@@ -4738,6 +5825,16 @@ mod traits {
         fn on_tx_stream_progress(&mut self, event: builder::TxStreamProgress);
         #[doc = "Publishes a `KeepAliveTimerExpired` event to the publisher's subscriber"]
         fn on_keep_alive_timer_expired(&mut self, event: builder::KeepAliveTimerExpired);
+        #[doc = "Publishes a `MtuUpdated` event to the publisher's subscriber"]
+        fn on_mtu_updated(&mut self, event: builder::MtuUpdated);
+        #[doc = "Publishes a `SlowStartExited` event to the publisher's subscriber"]
+        fn on_slow_start_exited(&mut self, event: builder::SlowStartExited);
+        #[doc = "Publishes a `DeliveryRateSampled` event to the publisher's subscriber"]
+        fn on_delivery_rate_sampled(&mut self, event: builder::DeliveryRateSampled);
+        #[doc = "Publishes a `PacingRateUpdated` event to the publisher's subscriber"]
+        fn on_pacing_rate_updated(&mut self, event: builder::PacingRateUpdated);
+        #[doc = "Publishes a `BbrStateChanged` event to the publisher's subscriber"]
+        fn on_bbr_state_changed(&mut self, event: builder::BbrStateChanged);
         #[doc = r" Returns the QUIC version negotiated for the current connection, if any"]
         fn quic_version(&self) -> u32;
         #[doc = r" Returns the [`Subject`] for the current publisher"]
@@ -4872,6 +5969,34 @@ mod traits {
             let event = event.into_event();
             self.subscriber
                 .on_congestion(self.context, &self.meta, &event);
+            self.subscriber
+                .on_connection_event(self.context, &self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
+        #[allow(deprecated)]
+        fn on_ack_processed(&mut self, event: builder::AckProcessed) {
+            let event = event.into_event();
+            self.subscriber
+                .on_ack_processed(self.context, &self.meta, &event);
+            self.subscriber
+                .on_connection_event(self.context, &self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
+        fn on_rx_ack_range_dropped(&mut self, event: builder::RxAckRangeDropped) {
+            let event = event.into_event();
+            self.subscriber
+                .on_rx_ack_range_dropped(self.context, &self.meta, &event);
+            self.subscriber
+                .on_connection_event(self.context, &self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
+        fn on_ack_range_received(&mut self, event: builder::AckRangeReceived) {
+            let event = event.into_event();
+            self.subscriber
+                .on_ack_range_received(self.context, &self.meta, &event);
             self.subscriber
                 .on_connection_event(self.context, &self.meta, &event);
             self.subscriber.on_event(&self.meta, &event);
@@ -5060,6 +6185,51 @@ mod traits {
             self.subscriber.on_event(&self.meta, &event);
         }
         #[inline]
+        fn on_mtu_updated(&mut self, event: builder::MtuUpdated) {
+            let event = event.into_event();
+            self.subscriber
+                .on_mtu_updated(self.context, &self.meta, &event);
+            self.subscriber
+                .on_connection_event(self.context, &self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
+        fn on_slow_start_exited(&mut self, event: builder::SlowStartExited) {
+            let event = event.into_event();
+            self.subscriber
+                .on_slow_start_exited(self.context, &self.meta, &event);
+            self.subscriber
+                .on_connection_event(self.context, &self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
+        fn on_delivery_rate_sampled(&mut self, event: builder::DeliveryRateSampled) {
+            let event = event.into_event();
+            self.subscriber
+                .on_delivery_rate_sampled(self.context, &self.meta, &event);
+            self.subscriber
+                .on_connection_event(self.context, &self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
+        fn on_pacing_rate_updated(&mut self, event: builder::PacingRateUpdated) {
+            let event = event.into_event();
+            self.subscriber
+                .on_pacing_rate_updated(self.context, &self.meta, &event);
+            self.subscriber
+                .on_connection_event(self.context, &self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
+        fn on_bbr_state_changed(&mut self, event: builder::BbrStateChanged) {
+            let event = event.into_event();
+            self.subscriber
+                .on_bbr_state_changed(self.context, &self.meta, &event);
+            self.subscriber
+                .on_connection_event(self.context, &self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
         fn quic_version(&self) -> u32 {
             self.quic_version
         }
@@ -5087,6 +6257,9 @@ pub mod testing {
         pub packet_lost: u32,
         pub recovery_metrics: u32,
         pub congestion: u32,
+        pub ack_processed: u32,
+        pub rx_ack_range_dropped: u32,
+        pub ack_range_received: u32,
         pub packet_dropped: u32,
         pub key_update: u32,
         pub key_space_discarded: u32,
@@ -5107,6 +6280,11 @@ pub mod testing {
         pub rx_stream_progress: u32,
         pub tx_stream_progress: u32,
         pub keep_alive_timer_expired: u32,
+        pub mtu_updated: u32,
+        pub slow_start_exited: u32,
+        pub delivery_rate_sampled: u32,
+        pub pacing_rate_updated: u32,
+        pub bbr_state_changed: u32,
         pub version_information: u32,
         pub endpoint_packet_sent: u32,
         pub endpoint_packet_received: u32,
@@ -5120,6 +6298,7 @@ pub mod testing {
         pub platform_rx_error: u32,
         pub platform_feature_configured: u32,
         pub platform_event_loop_wakeup: u32,
+        pub platform_event_loop_sleep: u32,
     }
     impl Drop for Subscriber {
         fn drop(&mut self) {
@@ -5155,6 +6334,9 @@ pub mod testing {
                 packet_lost: 0,
                 recovery_metrics: 0,
                 congestion: 0,
+                ack_processed: 0,
+                rx_ack_range_dropped: 0,
+                ack_range_received: 0,
                 packet_dropped: 0,
                 key_update: 0,
                 key_space_discarded: 0,
@@ -5175,6 +6357,11 @@ pub mod testing {
                 rx_stream_progress: 0,
                 tx_stream_progress: 0,
                 keep_alive_timer_expired: 0,
+                mtu_updated: 0,
+                slow_start_exited: 0,
+                delivery_rate_sampled: 0,
+                pacing_rate_updated: 0,
+                bbr_state_changed: 0,
                 version_information: 0,
                 endpoint_packet_sent: 0,
                 endpoint_packet_received: 0,
@@ -5188,6 +6375,7 @@ pub mod testing {
                 platform_rx_error: 0,
                 platform_feature_configured: 0,
                 platform_event_loop_wakeup: 0,
+                platform_event_loop_sleep: 0,
             }
         }
     }
@@ -5316,6 +6504,40 @@ pub mod testing {
             event: &api::Congestion,
         ) {
             self.congestion += 1;
+            if self.location.is_some() {
+                self.output.push(format!("{:?} {:?}", meta, event));
+            }
+        }
+        #[allow(deprecated)]
+        fn on_ack_processed(
+            &mut self,
+            _context: &mut Self::ConnectionContext,
+            meta: &api::ConnectionMeta,
+            event: &api::AckProcessed,
+        ) {
+            self.ack_processed += 1;
+            if self.location.is_some() {
+                self.output.push(format!("{:?} {:?}", meta, event));
+            }
+        }
+        fn on_rx_ack_range_dropped(
+            &mut self,
+            _context: &mut Self::ConnectionContext,
+            meta: &api::ConnectionMeta,
+            event: &api::RxAckRangeDropped,
+        ) {
+            self.rx_ack_range_dropped += 1;
+            if self.location.is_some() {
+                self.output.push(format!("{:?} {:?}", meta, event));
+            }
+        }
+        fn on_ack_range_received(
+            &mut self,
+            _context: &mut Self::ConnectionContext,
+            meta: &api::ConnectionMeta,
+            event: &api::AckRangeReceived,
+        ) {
+            self.ack_range_received += 1;
             if self.location.is_some() {
                 self.output.push(format!("{:?} {:?}", meta, event));
             }
@@ -5540,6 +6762,61 @@ pub mod testing {
                 self.output.push(format!("{:?} {:?}", meta, event));
             }
         }
+        fn on_mtu_updated(
+            &mut self,
+            _context: &mut Self::ConnectionContext,
+            meta: &api::ConnectionMeta,
+            event: &api::MtuUpdated,
+        ) {
+            self.mtu_updated += 1;
+            if self.location.is_some() {
+                self.output.push(format!("{:?} {:?}", meta, event));
+            }
+        }
+        fn on_slow_start_exited(
+            &mut self,
+            _context: &mut Self::ConnectionContext,
+            meta: &api::ConnectionMeta,
+            event: &api::SlowStartExited,
+        ) {
+            self.slow_start_exited += 1;
+            if self.location.is_some() {
+                self.output.push(format!("{:?} {:?}", meta, event));
+            }
+        }
+        fn on_delivery_rate_sampled(
+            &mut self,
+            _context: &mut Self::ConnectionContext,
+            meta: &api::ConnectionMeta,
+            event: &api::DeliveryRateSampled,
+        ) {
+            self.delivery_rate_sampled += 1;
+            if self.location.is_some() {
+                self.output.push(format!("{:?} {:?}", meta, event));
+            }
+        }
+        fn on_pacing_rate_updated(
+            &mut self,
+            _context: &mut Self::ConnectionContext,
+            meta: &api::ConnectionMeta,
+            event: &api::PacingRateUpdated,
+        ) {
+            self.pacing_rate_updated += 1;
+            if self.location.is_some() {
+                self.output.push(format!("{:?} {:?}", meta, event));
+            }
+        }
+        fn on_bbr_state_changed(
+            &mut self,
+            _context: &mut Self::ConnectionContext,
+            meta: &api::ConnectionMeta,
+            event: &api::BbrStateChanged,
+        ) {
+            self.bbr_state_changed += 1;
+            if self.location.is_some() {
+                self.output.push(format!("{:?} {:?}", meta, event));
+            }
+        }
         fn on_version_information(
             &mut self,
             meta: &api::EndpointMeta,
@@ -5628,6 +6905,14 @@ pub mod testing {
             self.platform_event_loop_wakeup += 1;
             self.output.push(format!("{:?} {:?}", meta, event));
         }
+        fn on_platform_event_loop_sleep(
+            &mut self,
+            meta: &api::EndpointMeta,
+            event: &api::PlatformEventLoopSleep,
+        ) {
+            self.platform_event_loop_sleep += 1;
+            self.output.push(format!("{:?} {:?}", meta, event));
+        }
     }
     #[derive(Clone, Debug)]
     pub struct Publisher {
@@ -5644,6 +6929,9 @@ pub mod testing {
         pub packet_lost: u32,
         pub recovery_metrics: u32,
         pub congestion: u32,
+        pub ack_processed: u32,
+        pub rx_ack_range_dropped: u32,
+        pub ack_range_received: u32,
         pub packet_dropped: u32,
         pub key_update: u32,
         pub key_space_discarded: u32,
@@ -5664,6 +6952,11 @@ pub mod testing {
         pub rx_stream_progress: u32,
         pub tx_stream_progress: u32,
         pub keep_alive_timer_expired: u32,
+        pub mtu_updated: u32,
+        pub slow_start_exited: u32,
+        pub delivery_rate_sampled: u32,
+        pub pacing_rate_updated: u32,
+        pub bbr_state_changed: u32,
         pub version_information: u32,
         pub endpoint_packet_sent: u32,
         pub endpoint_packet_received: u32,
@@ -5677,6 +6970,7 @@ pub mod testing {
         pub platform_rx_error: u32,
         pub platform_feature_configured: u32,
         pub platform_event_loop_wakeup: u32,
+        pub platform_event_loop_sleep: u32,
     }
     impl Publisher {
         #[doc = r" Creates a publisher with snapshot assertions enabled"]
@@ -5702,6 +6996,9 @@ pub mod testing {
                 packet_lost: 0,
                 recovery_metrics: 0,
                 congestion: 0,
+                ack_processed: 0,
+                rx_ack_range_dropped: 0,
+                ack_range_received: 0,
                 packet_dropped: 0,
                 key_update: 0,
                 key_space_discarded: 0,
@@ -5722,6 +7019,11 @@ pub mod testing {
                 rx_stream_progress: 0,
                 tx_stream_progress: 0,
                 keep_alive_timer_expired: 0,
+                mtu_updated: 0,
+                slow_start_exited: 0,
+                delivery_rate_sampled: 0,
+                pacing_rate_updated: 0,
+                bbr_state_changed: 0,
                 version_information: 0,
                 endpoint_packet_sent: 0,
                 endpoint_packet_received: 0,
@@ -5735,6 +7037,7 @@ pub mod testing {
                 platform_rx_error: 0,
                 platform_feature_configured: 0,
                 platform_event_loop_wakeup: 0,
+                platform_event_loop_sleep: 0,
             }
         }
     }
@@ -5804,6 +7107,11 @@ pub mod testing {
         }
         fn on_platform_event_loop_wakeup(&mut self, event: builder::PlatformEventLoopWakeup) {
             self.platform_event_loop_wakeup += 1;
+            let event = event.into_event();
+            self.output.push(format!("{:?}", event));
+        }
+        fn on_platform_event_loop_sleep(&mut self, event: builder::PlatformEventLoopSleep) {
+            self.platform_event_loop_sleep += 1;
             let event = event.into_event();
             self.output.push(format!("{:?}", event));
         }
@@ -5887,6 +7195,28 @@ pub mod testing {
         }
         fn on_congestion(&mut self, event: builder::Congestion) {
             self.congestion += 1;
+            let event = event.into_event();
+            if self.location.is_some() {
+                self.output.push(format!("{:?}", event));
+            }
+        }
+        #[allow(deprecated)]
+        fn on_ack_processed(&mut self, event: builder::AckProcessed) {
+            self.ack_processed += 1;
+            let event = event.into_event();
+            if self.location.is_some() {
+                self.output.push(format!("{:?}", event));
+            }
+        }
+        fn on_rx_ack_range_dropped(&mut self, event: builder::RxAckRangeDropped) {
+            self.rx_ack_range_dropped += 1;
+            let event = event.into_event();
+            if self.location.is_some() {
+                self.output.push(format!("{:?}", event));
+            }
+        }
+        fn on_ack_range_received(&mut self, event: builder::AckRangeReceived) {
+            self.ack_range_received += 1;
             let event = event.into_event();
             if self.location.is_some() {
                 self.output.push(format!("{:?}", event));
@@ -6030,6 +7360,41 @@ pub mod testing {
         }
         fn on_keep_alive_timer_expired(&mut self, event: builder::KeepAliveTimerExpired) {
             self.keep_alive_timer_expired += 1;
+            let event = event.into_event();
+            if self.location.is_some() {
+                self.output.push(format!("{:?}", event));
+            }
+        }
+        fn on_mtu_updated(&mut self, event: builder::MtuUpdated) {
+            self.mtu_updated += 1;
+            let event = event.into_event();
+            if self.location.is_some() {
+                self.output.push(format!("{:?}", event));
+            }
+        }
+        fn on_slow_start_exited(&mut self, event: builder::SlowStartExited) {
+            self.slow_start_exited += 1;
+            let event = event.into_event();
+            if self.location.is_some() {
+                self.output.push(format!("{:?}", event));
+            }
+        }
+        fn on_delivery_rate_sampled(&mut self, event: builder::DeliveryRateSampled) {
+            self.delivery_rate_sampled += 1;
+            let event = event.into_event();
+            if self.location.is_some() {
+                self.output.push(format!("{:?}", event));
+            }
+        }
+        fn on_pacing_rate_updated(&mut self, event: builder::PacingRateUpdated) {
+            self.pacing_rate_updated += 1;
+            let event = event.into_event();
+            if self.location.is_some() {
+                self.output.push(format!("{:?}", event));
+            }
+        }
+        fn on_bbr_state_changed(&mut self, event: builder::BbrStateChanged) {
+            self.bbr_state_changed += 1;
             let event = event.into_event();
             if self.location.is_some() {
                 self.output.push(format!("{:?}", event));

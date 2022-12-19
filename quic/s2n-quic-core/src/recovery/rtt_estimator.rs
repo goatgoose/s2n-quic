@@ -1,7 +1,9 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{packet::number::PacketNumberSpace, time::Timestamp};
+use crate::{
+    packet::number::PacketNumberSpace, time::Timestamp, transport::parameters::MaxAckDelay,
+};
 use core::{
     cmp::{max, min},
     time::Duration,
@@ -23,7 +25,7 @@ pub const K_GRANULARITY: Duration = Duration::from_millis(1);
 //# The RECOMMENDED value for kPersistentCongestionThreshold is 3, which
 //# results in behavior that is approximately equivalent to a TCP sender
 //# declaring an RTO after two TLPs.
-const K_PERSISTENT_CONGESTION_THRESHOLD: u32 = 3;
+const K_PERSISTENT_CONGESTION_THRESHOLD: u64 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RttEstimator {
@@ -41,6 +43,12 @@ pub struct RttEstimator {
     max_ack_delay: Duration,
     /// The time that the first RTT sample was obtained
     first_rtt_sample: Option<Timestamp>,
+}
+
+impl Default for RttEstimator {
+    fn default() -> Self {
+        RttEstimator::new(Duration::ZERO)
+    }
 }
 
 impl RttEstimator {
@@ -110,17 +118,23 @@ impl RttEstimator {
     //# an acknowledgement of a sent packet.
     #[inline]
     pub fn pto_period(&self, pto_backoff: u32, space: PacketNumberSpace) -> Duration {
+        // Since K_GRANULARITY is 1ms, we operate on milliseconds rather than `Duration` to improve efficiency.
+        // See https://godbolt.org/z/4o71WPods
+
         //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
         //# When an ack-eliciting packet is transmitted, the sender schedules a
         //# timer for the PTO period as follows:
         //#
         //# PTO = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay
-        let mut pto_period = self.smoothed_rtt();
+        let mut pto_period = self.smoothed_rtt().as_millis() as u64;
 
         //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
         //# The PTO period MUST be at least kGranularity, to avoid the timer
         //# expiring immediately.
-        pto_period += max(4 * self.rttvar(), K_GRANULARITY);
+        pto_period += max(
+            self.rttvar_4x().as_millis() as u64,
+            K_GRANULARITY.as_millis() as u64,
+        );
 
         //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
         //# When the PTO is armed for Initial or Handshake packet number spaces,
@@ -128,7 +142,7 @@ impl RttEstimator {
         //# the peer is expected to not delay these packets intentionally; see
         //# Section 13.2.1 of [QUIC-TRANSPORT].
         if space.is_application_data() {
-            pto_period += self.max_ack_delay;
+            pto_period += self.max_ack_delay.as_millis() as u64;
         }
 
         //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
@@ -137,16 +151,21 @@ impl RttEstimator {
         //# all spaces to prevent excess load on the network.  For example, a
         //# timeout in the Initial packet number space doubles the length of
         //# the timeout in the Handshake packet number space.
-        pto_period *= pto_backoff;
+        pto_period *= pto_backoff as u64;
 
         //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
         //# The PTO period is the amount of time that a sender ought to wait for
         //# an acknowledgement of a sent packet.
-        pto_period
+        Duration::from_millis(pto_period)
     }
-}
 
-impl RttEstimator {
+    /// Sets the `max_ack_delay` value from the peer `MaxAckDelay` transport parameter
+    pub fn on_max_ack_delay(&mut self, max_ack_delay: MaxAckDelay) {
+        self.max_ack_delay = max_ack_delay.as_duration()
+    }
+
+    /// Updates the RTT estimate using the given `rtt_sample`
+    #[inline]
     pub fn update_rtt(
         &mut self,
         mut ack_delay: Duration,
@@ -232,14 +251,18 @@ impl RttEstimator {
         //# smoothed_rtt = 7/8 * smoothed_rtt + 1/8 * adjusted_rtt
         //# rttvar_sample = abs(smoothed_rtt - adjusted_rtt)
         //# rttvar = 3/4 * rttvar + 1/4 * rttvar_sample
-        self.smoothed_rtt = 7 * self.smoothed_rtt / 8 + adjusted_rtt / 8;
+        self.smoothed_rtt = weighted_average(self.smoothed_rtt, adjusted_rtt, 8);
         let rttvar_sample = abs_difference(self.smoothed_rtt, adjusted_rtt);
-        self.rttvar = 3 * self.rttvar / 4 + rttvar_sample / 4;
+        self.rttvar = weighted_average(self.rttvar, rttvar_sample, 4);
     }
 
     /// Calculates the persistent congestion threshold used for determining
     /// if persistent congestion is being encountered.
+    #[inline]
     pub fn persistent_congestion_threshold(&self) -> Duration {
+        // Since K_GRANULARITY is 1ms, we operate on milliseconds rather than `Duration` to improve efficiency.
+        // See https://godbolt.org/z/4o71WPods
+
         //= https://www.rfc-editor.org/rfc/rfc9002#section-7.6.1
         //# The persistent congestion duration is computed as follows:
         //#
@@ -254,26 +277,56 @@ impl RttEstimator {
         //# establishing persistent congestion, including some in response to PTO
         //# expiration, as TCP does with Tail Loss Probes [RFC8985] and an RTO
         //# [RFC5681].
-        (self.smoothed_rtt + max(4 * self.rttvar, K_GRANULARITY) + self.max_ack_delay)
-            * K_PERSISTENT_CONGESTION_THRESHOLD
+        Duration::from_millis(
+            (self.smoothed_rtt.as_millis() as u64
+                + max(
+                    self.rttvar_4x().as_millis() as u64,
+                    K_GRANULARITY.as_millis() as u64,
+                )
+                + self.max_ack_delay.as_millis() as u64)
+                * K_PERSISTENT_CONGESTION_THRESHOLD,
+        )
     }
 
     /// Allows min_rtt and smoothed_rtt to be overwritten on the next RTT sample
     /// after persistent congestion is established.
+    #[inline]
     pub fn on_persistent_congestion(&mut self) {
         //= https://www.rfc-editor.org/rfc/rfc9002#section-5.2
         //# Endpoints SHOULD set the min_rtt to the newest RTT sample after
         //# persistent congestion is established.
         self.first_rtt_sample = None;
     }
+
+    #[inline]
+    fn rttvar_4x(&self) -> Duration {
+        // Operate on micros instead, as it's more efficient and we don't need the precision Duration gives
+        Duration::from_micros(4 * self.rttvar.as_micros() as u64)
+    }
 }
 
+#[inline]
 fn abs_difference<T: core::ops::Sub + PartialOrd>(a: T, b: T) -> <T as core::ops::Sub>::Output {
     if a > b {
         a - b
     } else {
         b - a
     }
+}
+
+/// Optimized function for averaging two durations with a weight
+/// See https://godbolt.org/z/65f9bYEcs
+#[inline]
+fn weighted_average(a: Duration, b: Duration, weight: u64) -> Duration {
+    let mut a = a.as_nanos() as u64;
+    // it's more accurate to multiply first but it risks overflow so we divide first
+    a /= weight;
+    a *= weight - 1;
+
+    let mut b = b.as_nanos() as u64;
+    b /= weight;
+
+    Duration::from_nanos(a + b)
 }
 
 #[cfg(test)]
@@ -283,6 +336,8 @@ mod test {
         path::INITIAL_PTO_BACKOFF,
         recovery::{RttEstimator, DEFAULT_INITIAL_RTT, K_GRANULARITY},
         time::{Clock, Duration, NoopClock},
+        transport::parameters::MaxAckDelay,
+        varint::VarInt,
     };
 
     /// Test the initial values before any RTT samples
@@ -334,7 +389,12 @@ mod test {
     //#    max_ack_delay after the handshake is confirmed;
     #[test]
     fn max_ack_delay() {
-        let mut rtt_estimator = RttEstimator::new(Duration::from_millis(10));
+        let mut rtt_estimator = RttEstimator::default();
+        assert_eq!(Duration::ZERO, rtt_estimator.max_ack_delay());
+
+        rtt_estimator.on_max_ack_delay(MaxAckDelay::new(VarInt::from_u8(10)).unwrap());
+        assert_eq!(Duration::from_millis(10), rtt_estimator.max_ack_delay());
+
         let now = NoopClock.get_time();
         rtt_estimator.update_rtt(
             Duration::from_millis(0),
@@ -462,7 +522,7 @@ mod test {
         assert_eq!(rtt_estimator.first_rtt_sample, Some(now));
         assert_eq!(
             rtt_estimator.pto_period(INITIAL_PTO_BACKOFF, PacketNumberSpace::ApplicationData),
-            Duration::from_nanos(1551249998)
+            Duration::from_millis(1551)
         );
     }
 
@@ -656,5 +716,30 @@ mod test {
 
         let pto_period = rtt_estimator.pto_period(INITIAL_PTO_BACKOFF, space);
         assert!(pto_period >= K_GRANULARITY);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // This test is too expensive for miri to complete in a reasonable amount of time
+    fn weighted_average_test() {
+        bolero::check!()
+            .with_type::<(u32, u32)>()
+            .for_each(|(a, b)| {
+                let a = Duration::from_nanos(*a as _);
+                let b = Duration::from_nanos(*b as _);
+
+                let weight = 8;
+
+                // perform the unoptimized version
+                let expected = ((weight - 1) as u32 * a) / weight + b / weight;
+                let actual = super::weighted_average(a, b, weight as _);
+
+                // assert that the unoptimized result matches the optimized to the nearest `weight` nanos
+                assert!(
+                    super::abs_difference(expected.as_nanos(), actual.as_nanos()) as u32 <= weight,
+                    "expected: {:?}; actual: {:?}",
+                    expected,
+                    actual
+                );
+            })
     }
 }

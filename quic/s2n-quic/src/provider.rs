@@ -17,13 +17,12 @@ pub mod stateless_reset_token;
 pub mod tls;
 
 // These providers are not currently exposed to applications
-pub(crate) mod congestion_controller;
 pub(crate) mod connection_close_formatter;
 pub(crate) mod path_migration;
 pub(crate) mod sync;
 
 cfg_if!(
-    if #[cfg(all(not(docdiff), feature = "unstable-provider-packet-interceptor"))] {
+    if #[cfg(any(test, all(not(docdiff), feature = "unstable-provider-packet-interceptor")))] {
         pub mod packet_interceptor;
     } else {
         pub(crate) mod packet_interceptor;
@@ -31,7 +30,7 @@ cfg_if!(
 );
 
 cfg_if!(
-    if #[cfg(all(not(docdiff), feature = "unstable-provider-random"))] {
+    if #[cfg(any(test, all(not(docdiff), feature = "unstable-provider-random")))] {
         pub mod random;
     } else {
         pub(crate) mod random;
@@ -39,10 +38,18 @@ cfg_if!(
 );
 
 cfg_if!(
-    if #[cfg(all(not(docdiff), feature = "unstable-provider-datagram"))] {
+    if #[cfg(any(test, all(not(docdiff), feature = "unstable-provider-datagram")))] {
         pub mod datagram;
     } else {
         pub(crate) mod datagram;
+    }
+);
+
+cfg_if!(
+    if #[cfg(any(test, all(not(docdiff), feature = "unstable-provider-congestion-controller")))] {
+        pub mod congestion_controller;
+    } else {
+        pub(crate) mod congestion_controller;
     }
 );
 

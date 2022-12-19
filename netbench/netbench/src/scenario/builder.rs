@@ -21,6 +21,62 @@ macro_rules! trace {
                 .push(crate::operation::Connection::Trace { trace_id });
             self
         }
+
+        pub fn profile<F: FnOnce(&mut Self)>(&mut self, name: &str, f: F) -> &mut Self {
+            let trace_id = self.state.trace(name);
+            let mut builder = self.child_scope();
+            f(&mut builder);
+            let operations = builder.finish_scope();
+
+            self.ops.push(crate::operation::Connection::Profile {
+                trace_id,
+                operations,
+            });
+
+            self
+        }
+    };
+}
+
+macro_rules! iterate {
+    () => {
+        pub fn iterate<I: Into<crate::operation::IterateValue>, F: FnOnce(&mut Self)>(
+            &mut self,
+            count: I,
+            f: F,
+        ) -> &mut Self {
+            let mut builder = self.child_scope();
+            f(&mut builder);
+            let mut operations = builder.finish_scope();
+
+            let count = count.into();
+
+            if operations.is_empty() || count.is_zero() {
+                return self;
+            }
+
+            let mut trace_id = None;
+
+            // optimize out nested iterate/profile statements
+            if operations.len() == 1 {
+                if let Some(crate::operation::Connection::Profile {
+                    trace_id: child_id,
+                    operations: child,
+                }) = operations.get_mut(0)
+                {
+                    trace_id = Some(*child_id);
+                    operations = core::mem::take(child);
+                }
+            }
+
+            self.ops.push(crate::operation::Connection::Iterate {
+                value: count,
+                operations,
+                trace_id,
+            });
+
+            self
+        }
     };
 }
 
@@ -86,7 +142,9 @@ impl Builder {
         let mut builder = client::Builder::new(id, self.state.clone());
         f(&mut builder);
 
-        self.state.clients.borrow_mut()[id as usize].scenario = builder.finish();
+        let client = &mut self.state.clients.borrow_mut()[id as usize];
+
+        client.scenario = builder.finish();
     }
 
     pub(super) fn finish(self) -> super::Scenario {
@@ -97,6 +155,7 @@ impl Builder {
             .into_iter()
             .map(|mut client| {
                 client.certificate_authorities.sort_unstable();
+
                 Arc::new(client)
             })
             .collect();

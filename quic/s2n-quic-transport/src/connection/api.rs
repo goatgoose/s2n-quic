@@ -16,8 +16,8 @@ use core::{
 use s2n_quic_core::{
     application,
     application::ServerName,
-    event::query::{Query, QueryMut},
     inet::SocketAddress,
+    query::{Query, QueryMut},
     stream::StreamType,
 };
 
@@ -210,5 +210,10 @@ impl Connection {
         query: &mut dyn QueryMut,
     ) -> Result<(), connection::Error> {
         self.api.query_event_context_mut(query)
+    }
+
+    #[inline]
+    pub fn datagram_mut(&self, query: &mut dyn QueryMut) -> Result<(), connection::Error> {
+        self.api.datagram_mut(query)
     }
 }

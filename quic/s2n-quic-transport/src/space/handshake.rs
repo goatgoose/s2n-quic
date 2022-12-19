@@ -166,6 +166,8 @@ impl<Config: endpoint::Config> HandshakeSpace<Config> {
             outcome,
             time_sent,
             context.ecn,
+            context.transmission_mode,
+            None,
             &mut recovery_context,
             context.publisher,
         );
@@ -252,7 +254,7 @@ impl<Config: endpoint::Config> HandshakeSpace<Config> {
             "Clients are never in an anti-amplification state"
         );
 
-        //= https://www.rfc-editor.org/rfc/rfc9002#section-A.6
+        //= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.6
         //# When a server is blocked by anti-amplification limits, receiving a
         //# datagram unblocks it, even if none of the packets in the datagram are
         //# successfully processed.  In such a case, the PTO timer will need to
@@ -267,6 +269,7 @@ impl<Config: endpoint::Config> HandshakeSpace<Config> {
         handshake_status: &HandshakeStatus,
         path_id: path::Id,
         path_manager: &mut path::Manager<Config>,
+        random_generator: &mut Config::RandomGenerator,
         timestamp: Timestamp,
         publisher: &mut Pub,
     ) {
@@ -274,7 +277,7 @@ impl<Config: endpoint::Config> HandshakeSpace<Config> {
 
         let (recovery_manager, mut context) =
             self.recovery(handshake_status, path_id, path_manager);
-        recovery_manager.on_timeout(timestamp, &mut context, publisher);
+        recovery_manager.on_timeout(timestamp, random_generator, &mut context, publisher);
     }
 
     /// Called before the Handshake packet space is discarded
@@ -496,15 +499,24 @@ impl<Config: endpoint::Config> PacketSpace<Config> for HandshakeSpace<Config> {
         timestamp: Timestamp,
         path_id: path::Id,
         path_manager: &mut path::Manager<Config>,
+        packet_number: PacketNumber,
         handshake_status: &mut HandshakeStatus,
         _local_id_registry: &mut connection::LocalIdRegistry,
+        random_generator: &mut Config::RandomGenerator,
         publisher: &mut Pub,
     ) -> Result<(), transport::Error> {
         let path = &mut path_manager[path_id];
         path.on_peer_validated();
         let (recovery_manager, mut context) =
             self.recovery(handshake_status, path_id, path_manager);
-        recovery_manager.on_ack_frame(timestamp, frame, &mut context, publisher)
+        recovery_manager.on_ack_frame(
+            timestamp,
+            frame,
+            packet_number,
+            random_generator,
+            &mut context,
+            publisher,
+        )
     }
 
     fn handle_connection_close_frame(
@@ -524,11 +536,18 @@ impl<Config: endpoint::Config> PacketSpace<Config> for HandshakeSpace<Config> {
         Ok(())
     }
 
-    fn on_processed_packet(
+    fn on_processed_packet<Pub: event::ConnectionPublisher>(
         &mut self,
         processed_packet: ProcessedPacket,
+        path_id: path::Id,
+        path: &Path<Config>,
+        publisher: &mut Pub,
     ) -> Result<(), transport::Error> {
-        self.ack_manager.on_processed_packet(&processed_packet);
+        self.ack_manager.on_processed_packet(
+            &processed_packet,
+            path_event!(path, path_id),
+            publisher,
+        );
         self.processed_packet_numbers
             .insert(processed_packet.packet_number)
             .expect("packet number was already checked");

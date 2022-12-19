@@ -30,6 +30,7 @@ use s2n_quic_core::{
         zero_rtt::ProtectedZeroRtt,
     },
     path::MaxMtu,
+    query,
     time::{Timer, Timestamp},
 };
 use std::sync::Mutex;
@@ -122,14 +123,6 @@ impl connection::Trait for TestConnection {
         if self.close_timer.poll_expiration(timestamp).is_ready() {
             self.is_closed = true;
         }
-        Ok(())
-    }
-
-    fn on_pending_ack_ranges(
-        &mut self,
-        _timestamp: Timestamp,
-        _subscriber: &mut <Self::Config as endpoint::Config>::EventSubscriber,
-    ) -> Result<(), connection::Error> {
         Ok(())
     }
 
@@ -313,11 +306,15 @@ impl connection::Trait for TestConnection {
         None
     }
 
-    fn query_event_context(&self, _query: &mut dyn event::query::Query) {
+    fn query_event_context(&self, _query: &mut dyn query::Query) {
         todo!()
     }
 
-    fn query_event_context_mut(&mut self, _query: &mut dyn event::query::QueryMut) {
+    fn query_event_context_mut(&mut self, _query: &mut dyn query::QueryMut) {
+        todo!()
+    }
+
+    fn datagram_mut(&mut self, _query: &mut dyn query::QueryMut) {
         todo!()
     }
 

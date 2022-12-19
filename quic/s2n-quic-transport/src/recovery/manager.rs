@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    ack::pending_ack_ranges::PendingAckRanges,
     contexts::WriteContext,
     endpoint,
     path::{self, ecn::ValidationOutcome, path_event, Path},
@@ -31,11 +30,11 @@ pub struct Manager<Config: endpoint::Config> {
     // The packet space for this recovery manager
     space: PacketNumberSpace,
 
-    //= https://www.rfc-editor.org/rfc/rfc9002#section-A.3
+    //= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.3
     //# The largest packet number acknowledged in the packet number space so far.
     largest_acked_packet: Option<PacketNumber>,
 
-    //= https://www.rfc-editor.org/rfc/rfc9002#section-A.3
+    //= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.3
     //# An association of packet numbers in a packet number space to information about them.
     //  These are packets that are pending acknowledgement.
     sent_packets: SentPackets<<<Config::CongestionControllerEndpoint as congestion_controller::Endpoint>::CongestionController as congestion_controller::CongestionController>::PacketInfo>,
@@ -51,7 +50,7 @@ pub struct Manager<Config: endpoint::Config> {
     //# tail packets or acknowledgments.
     pto: Pto,
 
-    //= https://www.rfc-editor.org/rfc/rfc9002#section-A.3
+    //= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.3
     //# The time the most recent ack-eliciting packet was sent.
     time_of_last_ack_eliciting_packet: Option<Timestamp>,
 
@@ -95,9 +94,12 @@ macro_rules! recovery_event {
             pto_count: ($path.pto_backoff as f32).log2() as u32,
             congestion_window: $path.congestion_controller.congestion_window(),
             bytes_in_flight: $path.congestion_controller.bytes_in_flight(),
+            congestion_limited: $path.transmission_constraint().is_congestion_limited(),
         }
     };
 }
+
+pub(crate) use recovery_event;
 
 // Since `SentPacketInfo` is generic over a type supplied by the Congestion Controller implementation,
 // the type definition is particularly lengthy, especially since rust requires the fully-qualified
@@ -129,7 +131,12 @@ impl<Config: endpoint::Config> Manager<Config> {
     ///
     /// Reset congestion controller state by discarding sent bytes and replacing recovery
     /// manager with a new instance of itself.
-    pub fn on_retry_packet(&mut self, path: &mut Path<Config>) {
+    pub fn on_retry_packet<Pub: event::ConnectionPublisher>(
+        &mut self,
+        path: &mut Path<Config>,
+        path_id: path::Id,
+        publisher: &mut Pub,
+    ) {
         debug_assert!(
             Config::ENDPOINT_TYPE.is_client(),
             "only a Client should process a Retry packet"
@@ -139,8 +146,10 @@ impl<Config: endpoint::Config> Manager<Config> {
         for (_, unacked_sent_info) in self.sent_packets.iter() {
             discarded_bytes += unacked_sent_info.sent_bytes as usize;
         }
-        path.congestion_controller
-            .on_packet_discarded(discarded_bytes);
+        path.congestion_controller.on_packet_discarded(
+            discarded_bytes,
+            &mut congestion_controller::PathPublisher::new(publisher, path_id),
+        );
 
         *self = Self::new(self.space);
     }
@@ -148,12 +157,18 @@ impl<Config: endpoint::Config> Manager<Config> {
     pub fn on_timeout<Ctx: Context<Config>, Pub: event::ConnectionPublisher>(
         &mut self,
         timestamp: Timestamp,
+        random_generator: &mut Config::RandomGenerator,
         context: &mut Ctx,
         publisher: &mut Pub,
     ) {
         if self.loss_timer.is_armed() {
             if self.loss_timer.poll_expiration(timestamp).is_ready() {
-                self.detect_and_remove_lost_packets(timestamp, context, publisher);
+                self.detect_and_remove_lost_packets(
+                    timestamp,
+                    random_generator,
+                    context,
+                    publisher,
+                );
             }
         } else {
             let pto_expired = self
@@ -168,7 +183,7 @@ impl<Config: endpoint::Config> Manager<Config> {
             //# When a PTO timer expires, the PTO backoff MUST be increased,
             //# resulting in the PTO period being set to twice its current value.
             if pto_expired {
-                // Note: the psuedocode updates the pto timer in OnLossDetectionTimeout
+                // Note: the pseudocode updates the pto timer in OnLossDetectionTimeout
                 // (see section A.9). We don't do that here since it will be rearmed in
                 // `on_packet_sent`, which immediately follows a timeout.
                 context.path_mut().pto_backoff *= 2;
@@ -180,14 +195,17 @@ impl<Config: endpoint::Config> Manager<Config> {
         publisher.on_recovery_metrics(recovery_event!(path_id, path));
     }
 
-    //= https://www.rfc-editor.org/rfc/rfc9002#section-A.5
+    //= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.5
     //# After a packet is sent, information about the packet is stored.
+    #[allow(clippy::too_many_arguments)]
     pub fn on_packet_sent<Ctx: Context<Config>, Pub: event::ConnectionPublisher>(
         &mut self,
         packet_number: PacketNumber,
         outcome: transmission::Outcome,
         time_sent: Timestamp,
         ecn: ExplicitCongestionNotification,
+        transmission_mode: transmission::Mode,
+        app_limited: Option<bool>,
         context: &mut Ctx,
         publisher: &mut Pub,
     ) {
@@ -211,7 +229,9 @@ impl<Config: endpoint::Config> Manager<Config> {
         let cc_packet_info = path.congestion_controller.on_packet_sent(
             time_sent,
             congestion_controlled_bytes,
+            app_limited,
             &path.rtt_estimator,
+            &mut congestion_controller::PathPublisher::new(publisher, path_id),
         );
 
         self.sent_packets.insert(
@@ -223,6 +243,7 @@ impl<Config: endpoint::Config> Manager<Config> {
                 outcome.ack_elicitation,
                 path_id,
                 ecn,
+                transmission_mode,
                 cc_packet_info,
             ),
         );
@@ -305,43 +326,6 @@ impl<Config: endpoint::Config> Manager<Config> {
         self.pto.on_transmit(context)
     }
 
-    /// Process pending ACK information.
-    ///
-    /// Update congestion controller, timers and meta data around acked packet ranges.
-    pub fn on_pending_ack_ranges<Ctx: Context<Config>, Pub: event::ConnectionPublisher>(
-        &mut self,
-        timestamp: Timestamp,
-        pending_ack_ranges: &mut PendingAckRanges,
-        context: &mut Ctx,
-        publisher: &mut Pub,
-    ) -> Result<(), transport::Error> {
-        debug_assert!(
-            !pending_ack_ranges.is_empty(),
-            "pending_ack_ranges should be non-empty since connection indicated ack interest"
-        );
-
-        let largest_acked_packet_number = pending_ack_ranges
-            .max_value()
-            .expect("pending range should not be empty");
-        let result = self.process_acks(
-            timestamp,
-            pending_ack_ranges.iter(),
-            largest_acked_packet_number,
-            pending_ack_ranges.ack_delay(),
-            pending_ack_ranges.ecn_counts(),
-            context,
-            publisher,
-        );
-
-        // reset pending ack information after processing
-        //
-        // If there was an error during processing its probably safer
-        // to clear the queue rather than try again.
-        pending_ack_ranges.clear();
-
-        result
-    }
-
     /// Process ACK frame.
     ///
     /// Update congestion controller, timers and meta data around acked packet ranges.
@@ -353,11 +337,14 @@ impl<Config: endpoint::Config> Manager<Config> {
         &mut self,
         timestamp: Timestamp,
         frame: frame::Ack<A>,
+        packet_number: PacketNumber,
+        random_generator: &mut Config::RandomGenerator,
         context: &mut Ctx,
         publisher: &mut Pub,
     ) -> Result<(), transport::Error> {
         let space = self.space;
         let largest_acked_packet_number = space.new_packet_number(frame.largest_acknowledged());
+
         self.process_acks(
             timestamp,
             frame.ack_ranges().map(|ack_range| {
@@ -367,6 +354,8 @@ impl<Config: endpoint::Config> Manager<Config> {
             largest_acked_packet_number,
             frame.ack_delay(),
             frame.ecn_counts,
+            packet_number,
+            random_generator,
             context,
             publisher,
         )?;
@@ -383,6 +372,8 @@ impl<Config: endpoint::Config> Manager<Config> {
         largest_acked_packet_number: PacketNumber,
         ack_delay: Duration,
         ecn_counts: Option<EcnCounts>,
+        packet_number: PacketNumber,
+        random_generator: &mut Config::RandomGenerator,
         context: &mut Ctx,
         publisher: &mut Pub,
     ) -> Result<(), transport::Error> {
@@ -401,6 +392,7 @@ impl<Config: endpoint::Config> Manager<Config> {
         let (largest_newly_acked, includes_ack_eliciting) = self.process_ack_range(
             &mut newly_acked_packets,
             timestamp,
+            packet_number,
             ranges,
             context,
             publisher,
@@ -421,6 +413,7 @@ impl<Config: endpoint::Config> Manager<Config> {
                 timestamp,
                 ack_delay,
                 context,
+                publisher,
             );
 
             let (_, largest_newly_acked_info) = largest_newly_acked;
@@ -430,6 +423,7 @@ impl<Config: endpoint::Config> Manager<Config> {
                 acked_new_largest_packet,
                 timestamp,
                 ecn_counts,
+                random_generator,
                 context,
                 publisher,
             );
@@ -449,6 +443,7 @@ impl<Config: endpoint::Config> Manager<Config> {
             [SentPacketInfo<packet_info_type!()>; ACKED_PACKETS_INITIAL_CAPACITY],
         >,
         timestamp: Timestamp,
+        packet_number: PacketNumber,
         ranges: impl Iterator<Item = PacketNumberRange>,
         context: &mut Ctx,
         publisher: &mut Pub,
@@ -457,6 +452,18 @@ impl<Config: endpoint::Config> Manager<Config> {
         let mut includes_ack_eliciting = false;
 
         for pn_range in ranges {
+            // The path the ack was received on
+            let rx_path_id = context.path_id();
+            let rx_path = context.path_mut();
+            publisher.on_ack_range_received(event::builder::AckRangeReceived {
+                packet_header: event::builder::PacketHeader::new(
+                    packet_number,
+                    publisher.quic_version(),
+                ),
+                path: path_event!(rx_path, rx_path_id),
+                ack_range: pn_range.into_event(),
+            });
+
             context.validate_packet_ack(timestamp, &pn_range)?;
             // notify components of packets acked
             context.on_packet_ack(timestamp, &pn_range);
@@ -487,6 +494,8 @@ impl<Config: endpoint::Config> Manager<Config> {
                     packet_number,
                     acked_packet_info.sent_bytes,
                     &mut path.congestion_controller,
+                    acked_packet_info.path_id,
+                    publisher,
                 );
                 path.ecn_controller
                     .on_packet_ack(acked_packet_info.time_sent, acked_packet_info.ecn);
@@ -501,7 +510,8 @@ impl<Config: endpoint::Config> Manager<Config> {
         Ok((largest_newly_acked, includes_ack_eliciting))
     }
 
-    fn update_congestion_control<Ctx: Context<Config>>(
+    #[allow(clippy::too_many_arguments)]
+    fn update_congestion_control<Ctx: Context<Config>, Pub: event::ConnectionPublisher>(
         &mut self,
         largest_newly_acked: PacketDetails<packet_info_type!()>,
         largest_acked_packet_number: PacketNumber,
@@ -509,6 +519,7 @@ impl<Config: endpoint::Config> Manager<Config> {
         timestamp: Timestamp,
         ack_delay: Duration,
         context: &mut Ctx,
+        publisher: &mut Pub,
     ) {
         let mut should_update_rtt = true;
         let is_handshake_confirmed = context.is_handshake_confirmed();
@@ -542,8 +553,15 @@ impl<Config: endpoint::Config> Manager<Config> {
             );
 
             // Update the congestion controller with the latest RTT estimate
-            path.congestion_controller
-                .on_rtt_update(largest_newly_acked_info.time_sent, &path.rtt_estimator);
+            path.congestion_controller.on_rtt_update(
+                largest_newly_acked_info.time_sent,
+                timestamp,
+                &path.rtt_estimator,
+                &mut congestion_controller::PathPublisher::new(
+                    publisher,
+                    largest_newly_acked_info.path_id,
+                ),
+            );
 
             // Notify components the RTT estimate was updated
             context.on_rtt_update();
@@ -560,6 +578,7 @@ impl<Config: endpoint::Config> Manager<Config> {
         new_largest_packet: bool,
         timestamp: Timestamp,
         ecn_counts: Option<EcnCounts>,
+        random_generator: &mut Config::RandomGenerator,
         context: &mut Ctx,
         publisher: &mut Pub,
     ) {
@@ -567,7 +586,7 @@ impl<Config: endpoint::Config> Manager<Config> {
         //# Once a later packet within the same packet number space has been
         //# acknowledged, an endpoint SHOULD declare an earlier packet lost if it
         //# was sent a threshold amount of time in the past.
-        self.detect_and_remove_lost_packets(timestamp, context, publisher);
+        self.detect_and_remove_lost_packets(timestamp, random_generator, context, publisher);
 
         let current_path_id = context.path_id();
         let is_handshake_confirmed = context.is_handshake_confirmed();
@@ -588,7 +607,12 @@ impl<Config: endpoint::Config> Manager<Config> {
                     sent_bytes,
                     acked_packet_info.cc_packet_info,
                     &path.rtt_estimator,
+                    random_generator,
                     timestamp,
+                    &mut congestion_controller::PathPublisher::new(
+                        publisher,
+                        acked_packet_info.path_id,
+                    ),
                 );
             }
 
@@ -640,9 +664,10 @@ impl<Config: endpoint::Config> Manager<Config> {
                 current_path_acked_bytes,
                 largest_newly_acked.cc_packet_info,
                 &path.rtt_estimator,
+                random_generator,
                 timestamp,
+                &mut congestion_controller::PathPublisher::new(publisher, current_path_id),
             );
-
             self.update_pto_timer(path, timestamp, is_handshake_confirmed);
         }
     }
@@ -669,7 +694,7 @@ impl<Config: endpoint::Config> Manager<Config> {
             publisher,
         );
 
-        if matches!(outcome, ValidationOutcome::CongestionExperienced) {
+        if let ValidationOutcome::CongestionExperienced(ce_count) = outcome {
             //= https://www.rfc-editor.org/rfc/rfc9002#section-7.1
             //# If a path has been validated to support Explicit Congestion
             //# Notification (ECN) [RFC3168] [RFC8311], QUIC treats a Congestion
@@ -678,7 +703,11 @@ impl<Config: endpoint::Config> Manager<Config> {
             context
                 .path_mut()
                 .congestion_controller
-                .on_congestion_event(timestamp);
+                .on_explicit_congestion(
+                    ce_count.as_u64(),
+                    timestamp,
+                    &mut congestion_controller::PathPublisher::new(publisher, path_id),
+                );
             let path = context.path();
             publisher.on_congestion(event::builder::Congestion {
                 path: path_event!(path, path_id),
@@ -696,7 +725,7 @@ impl<Config: endpoint::Config> Manager<Config> {
         matches!(self.pto.state, PtoState::RequiresTransmission(_))
     }
 
-    //= https://www.rfc-editor.org/rfc/rfc9002#section-B.9
+    //= https://www.rfc-editor.org/rfc/rfc9002#appendix-B.9
     //# When Initial or Handshake keys are discarded, packets sent in that
     //# space no longer count toward bytes in flight.
     /// Clears bytes in flight for sent packets.
@@ -721,17 +750,20 @@ impl<Config: endpoint::Config> Manager<Config> {
             );
             discarded_bytes += unacked_sent_info.sent_bytes as usize;
         }
-        path.congestion_controller
-            .on_packet_discarded(discarded_bytes);
+        path.congestion_controller.on_packet_discarded(
+            discarded_bytes,
+            &mut congestion_controller::PathPublisher::new(publisher, path_id),
+        );
     }
 
-    //= https://www.rfc-editor.org/rfc/rfc9002#section-A.10
+    //= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.10
     //# DetectAndRemoveLostPackets is called every time an ACK is received or the time threshold
     //# loss detection timer expires. This function operates on the sent_packets for that packet
     //# number space and returns a list of packets newly detected as lost.
     fn detect_and_remove_lost_packets<Ctx: Context<Config>, Pub: event::ConnectionPublisher>(
         &mut self,
         now: Timestamp,
+        random_generator: &mut Config::RandomGenerator,
         context: &mut Ctx,
         publisher: &mut Pub,
     ) {
@@ -746,6 +778,7 @@ impl<Config: endpoint::Config> Manager<Config> {
             now,
             persistent_congestion_duration,
             sent_packets_to_remove,
+            random_generator,
             context,
             publisher,
         );
@@ -851,6 +884,7 @@ impl<Config: endpoint::Config> Manager<Config> {
         now: Timestamp,
         persistent_congestion_duration: Duration,
         sent_packets_to_remove: Vec<PacketDetails<packet_info_type!()>>,
+        random_generator: &mut Config::RandomGenerator,
         context: &mut Ctx,
         publisher: &mut Pub,
     ) {
@@ -877,8 +911,7 @@ impl<Config: endpoint::Config> Manager<Config> {
                 packet_number.checked_distance(prev) != Some(1)
             });
 
-            let mut is_mtu_probe = false;
-            if sent_info.sent_bytes as usize > path.mtu_controller.mtu() {
+            if sent_info.transmission_mode.is_mtu_probing() {
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-14.4
                 //# Loss of a QUIC packet that is carried in a PMTU probe is therefore not a
                 //# reliable indication of congestion and SHOULD NOT trigger a congestion
@@ -889,18 +922,20 @@ impl<Config: endpoint::Config> Manager<Config> {
                 //# indication of congestion and SHOULD NOT trigger a congestion
                 //# control reaction [RFC4821] because this could result in
                 //# unnecessary reduction of the sending rate.
-                path.congestion_controller
-                    .on_packet_discarded(sent_info.sent_bytes as usize);
-                is_mtu_probe = true;
+                path.congestion_controller.on_packet_discarded(
+                    sent_info.sent_bytes as usize,
+                    &mut congestion_controller::PathPublisher::new(publisher, sent_info.path_id),
+                );
             } else if sent_info.sent_bytes > 0 {
                 path.congestion_controller.on_packet_lost(
                     sent_info.sent_bytes as u32,
                     sent_info.cc_packet_info,
                     persistent_congestion,
                     new_loss_burst,
+                    random_generator,
                     now,
+                    &mut congestion_controller::PathPublisher::new(publisher, sent_info.path_id),
                 );
-                is_mtu_probe = false;
                 is_congestion_event = true;
             }
 
@@ -911,7 +946,7 @@ impl<Config: endpoint::Config> Manager<Config> {
                 ),
                 path: path_event!(path, current_path_id),
                 bytes_lost: sent_info.sent_bytes,
-                is_mtu_probe,
+                is_mtu_probe: sent_info.transmission_mode.is_mtu_probing(),
             });
 
             // Notify the MTU controller of packet loss even if it wasn't a probe since it uses
@@ -921,6 +956,8 @@ impl<Config: endpoint::Config> Manager<Config> {
                 sent_info.sent_bytes,
                 now,
                 &mut path.congestion_controller,
+                sent_info.path_id,
+                publisher,
             );
 
             let path_id = sent_info.path_id;
@@ -1113,7 +1150,7 @@ impl Pto {
                 //# has Handshake keys, otherwise it MUST send an Initial packet in a
                 //# UDP datagram with a payload of at least 1200 bytes.
 
-                //= https://www.rfc-editor.org/rfc/rfc9002#section-A.9
+                //= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.9
                 //# // Client sends an anti-deadlock packet: Initial is padded
                 //# // to earn more anti-amplification credit,
                 //# // a Handshake packet proves address ownership.

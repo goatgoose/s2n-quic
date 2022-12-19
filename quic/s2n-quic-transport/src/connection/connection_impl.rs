@@ -4,7 +4,6 @@
 //! Contains the implementation of the `Connection`
 
 use crate::{
-    ack::interest::Provider as _,
     connection::{
         self,
         close_sender::CloseSender,
@@ -19,7 +18,7 @@ use crate::{
     endpoint,
     path::{self, path_event},
     processed_packet::ProcessedPacket,
-    recovery::RttEstimator,
+    recovery::{recovery_event, RttEstimator},
     space::{PacketSpace, PacketSpaceManager},
     stream, transmission,
     transmission::interest::Provider as _,
@@ -37,9 +36,10 @@ use s2n_quic_core::{
     application::ServerName,
     connection::{id::Generator as _, InitialId, PeerId},
     crypto::{tls, CryptoSuite},
+    datagram::{Receiver, Sender},
     event::{
         self,
-        builder::{DatagramDropReason, RxStreamProgress, TxStreamProgress},
+        builder::{DatagramDropReason, MtuUpdatedCause, RxStreamProgress, TxStreamProgress},
         supervisor, ConnectionPublisher as _, IntoEvent as _, Subscriber,
     },
     inet::{DatagramInfo, SocketAddress},
@@ -54,6 +54,7 @@ use s2n_quic_core::{
         zero_rtt::ProtectedZeroRtt,
     },
     path::{Handle as _, MaxMtu},
+    query,
     recovery::CongestionController,
     stateless_reset::token::Generator as _,
     time::{timer, Timestamp},
@@ -218,7 +219,7 @@ impl<Config: endpoint::Config> EventContext<Config> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(s2n_quic_dump_on_panic)]
 impl<Config: endpoint::Config> Drop for ConnectionImpl<Config> {
     fn drop(&mut self) {
         if std::thread::panicking() {
@@ -341,7 +342,7 @@ impl<Config: endpoint::Config> ConnectionImpl<Config> {
         //# commits to initiating an immediate close (Section 10.2) if it
         //# abandons the connection prior to the effective value.
 
-        let mut duration = self.limits.max_idle_timeout()?;
+        let mut duration = self.limits.max_idle_timeout()?.as_millis() as u64;
 
         //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
         //# To avoid excessively small idle timeout periods, endpoints MUST
@@ -349,9 +350,9 @@ impl<Config: endpoint::Config> ConnectionImpl<Config> {
         //# current Probe Timeout (PTO).  This allows for multiple PTOs to
         //# expire, and therefore multiple probes to be sent and lost, prior to
         //# idle timeout.
-        duration = duration.max(3 * self.current_pto());
+        duration = duration.max(3 * self.current_pto().as_millis() as u64);
 
-        Some(duration)
+        Some(Duration::from_millis(duration))
     }
 
     fn on_processed_packet(
@@ -563,7 +564,7 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
 
         // The path manager always starts with a single path containing the known peer and local
         // connection ids.
-        let rtt_estimator = RttEstimator::new(parameters.limits.ack_settings().max_ack_delay);
+        let rtt_estimator = RttEstimator::default();
         // Assume clients validate the server's address implicitly.
         let peer_validated = Self::Config::ENDPOINT_TYPE.is_server();
 
@@ -591,6 +592,12 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
                 id: path_manager.active_path_id().into_event(),
                 is_active: true,
             },
+        });
+
+        publisher.on_mtu_updated(event::builder::MtuUpdated {
+            path_id: path_manager.active_path_id().into_event(),
+            mtu: path_manager.active_path().mtu_controller.mtu() as u16,
+            cause: MtuUpdatedCause::NewPath,
         });
 
         let wakeup_handle = Arc::from(parameters.wakeup_handle);
@@ -757,6 +764,12 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
             self.state = ConnectionState::Finished;
         }
 
+        // Notify the datagram manager that the connection has closed
+        if let Some((space, _)) = self.space_manager.application_mut() {
+            space.datagram_manager.sender.on_connection_error(error);
+            space.datagram_manager.receiver.on_connection_error(error);
+        }
+
         //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
         //# In the closing state, an endpoint retains only enough information to
         //# generate a packet containing a CONNECTION_CLOSE frame and to identify
@@ -899,6 +912,19 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
                     }
                 }
 
+                let meta = event::builder::ConnectionMeta {
+                    endpoint_type: Config::ENDPOINT_TYPE,
+                    id: self.internal_connection_id().into(),
+                    timestamp,
+                };
+                let path_id = self.path_manager.active_path_id().as_u8();
+                let path = self.path_manager.active_path();
+                subscriber.on_recovery_metrics(
+                    &mut self.event_context.context,
+                    &meta.into_event(),
+                    &recovery_event!(path_id, path).into_event(),
+                );
+
                 // PathValidationOnly handles transmission on non-active paths. Transmission
                 // on the active path should be handled prior to this.
                 count += self.path_validation_only_transmission(
@@ -986,6 +1012,7 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
         self.space_manager.on_timeout(
             &mut self.local_id_registry,
             &mut self.path_manager,
+            random_generator,
             timestamp,
             &mut publisher,
         );
@@ -1046,33 +1073,6 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
         */
 
         Ok(())
-    }
-
-    /// Process ACKs for the `Connection`.
-    fn on_pending_ack_ranges(
-        &mut self,
-        timestamp: Timestamp,
-        subscriber: &mut Config::EventSubscriber,
-    ) -> Result<(), connection::Error> {
-        let mut publisher = self.event_context.publisher(timestamp, subscriber);
-
-        // TODO: care should be taken to only delay ACK processing for the active path.
-        // However, the active path could change so it might be necessary to track the
-        // active path across some ACK delay processing.
-        let path_id = self.path_manager.active_path_id();
-        self.space_manager
-            .on_pending_ack_ranges(
-                timestamp,
-                path_id,
-                &mut self.path_manager,
-                &mut self.local_id_registry,
-                &mut publisher,
-            )
-            .map_err(|err| {
-                // TODO: publish metrics
-
-                err.into()
-            })
     }
 
     /// Handles all external wakeups on the [`Connection`].
@@ -1147,7 +1147,7 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
                     .on_datagram_received(rtt, datagram.timestamp);
             }
         } else if unblocked {
-            //= https://www.rfc-editor.org/rfc/rfc9002#section-A.6
+            //= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.6
             //# When a server is blocked by anti-amplification limits, receiving a
             //# datagram unblocks it, even if none of the packets in the datagram are
             //# successfully processed.  In such a case, the PTO timer will need to
@@ -1637,7 +1637,13 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
             .on_retry_packet(retry_source_connection_id);
 
         if let Some((space, _handshake_status)) = self.space_manager.initial_mut() {
-            space.on_retry_packet(path, &retry_source_connection_id, packet.retry_token);
+            space.on_retry_packet(
+                path,
+                path_id,
+                &retry_source_connection_id,
+                packet.retry_token,
+                &mut publisher,
+            );
         }
 
         Ok(())
@@ -1676,14 +1682,12 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
                     && self.space_manager.handshake().is_none()
                     && self.local_id_registry.connection_id_interest()
                         != connection::id::Interest::None;
-                interests.ack = self.space_manager.has_ack_interest();
             }
             ConnectionState::Closing => {
                 let constraint = self.path_manager.active_path().transmission_constraint();
                 interests.closing = true;
                 interests.transmission = self.close_sender.can_transmit(constraint);
                 interests.finalization = self.close_sender.finalization_status().is_final();
-                interests.ack = self.space_manager.has_ack_interest();
             }
             ConnectionState::Draining | ConnectionState::Finished => {
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.2
@@ -1693,7 +1697,6 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
 
                 // Remove the connection from the endpoint
                 interests.finalization = true;
-                interests.ack = self.space_manager.has_ack_interest();
             }
         }
 
@@ -1764,7 +1767,7 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
 
         space
             .stream_manager
-            .poll_open(stream_type, open_token, context)
+            .poll_open_local_stream(stream_type, open_token, context)
     }
 
     fn application_close(&mut self, error: Option<application::Error>) {
@@ -1841,16 +1844,25 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
     }
 
     #[inline]
-    fn query_event_context(&self, query: &mut dyn event::query::Query) {
+    fn query_event_context(&self, query: &mut dyn query::Query) {
         <Config::EventSubscriber as event::Subscriber>::query(&self.event_context.context, query);
     }
 
     #[inline]
-    fn query_event_context_mut(&mut self, query: &mut dyn event::query::QueryMut) {
+    fn query_event_context_mut(&mut self, query: &mut dyn query::QueryMut) {
         <Config::EventSubscriber as event::Subscriber>::query_mut(
             &mut self.event_context.context,
             query,
         );
+    }
+
+    #[inline]
+    fn datagram_mut(&mut self, query: &mut dyn query::QueryMut) {
+        if let Some((space, _)) = self.space_manager.application_mut() {
+            if space.datagram_manager.datagram_mut(query).is_ready() {
+                self.wakeup_handle.wakeup();
+            }
+        }
     }
 
     fn with_event_publisher<F>(

@@ -15,8 +15,11 @@ use s2n_quic_core::{
     transport,
 };
 #[cfg(any(test, all(s2n_quic_unstable, feature = "unstable_client_hello")))]
-use s2n_tls::raw::{config::ClientHelloHandler, connection::Connection};
-use s2n_tls::raw::{config::VerifyClientCertificateHandler, error::Error};
+use s2n_tls::{callbacks::ClientHelloCallback, connection::Connection};
+use s2n_tls::{
+    callbacks::{ConnectionFuture, VerifyHostNameCallback},
+    error::Error,
+};
 use std::sync::Arc;
 
 pub struct MyClientHelloHandler {
@@ -34,8 +37,30 @@ impl MyClientHelloHandler {
 }
 
 #[cfg(any(test, all(s2n_quic_unstable, feature = "unstable_client_hello")))]
-impl ClientHelloHandler for MyClientHelloHandler {
-    fn poll_client_hello(&self, _connection: &mut Connection) -> core::task::Poll<Result<(), ()>> {
+impl ClientHelloCallback for MyClientHelloHandler {
+    fn on_client_hello(
+        &self,
+        _connection: &mut Connection,
+    ) -> Result<Option<std::pin::Pin<Box<dyn s2n_tls::callbacks::ConnectionFuture>>>, Error> {
+        let fut = MyConnectionFuture {
+            done: self.done.clone(),
+            wait_counter: self.wait_counter.clone(),
+        };
+        Ok(Some(Box::pin(fut)))
+    }
+}
+
+struct MyConnectionFuture {
+    done: Arc<AtomicBool>,
+    wait_counter: Arc<AtomicU8>,
+}
+
+impl ConnectionFuture for MyConnectionFuture {
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _connection: &mut Connection,
+        _ctx: &mut core::task::Context,
+    ) -> Poll<Result<(), Error>> {
         if self.wait_counter.fetch_sub(1, Ordering::SeqCst) == 0 {
             self.done.store(true, Ordering::SeqCst);
             return Poll::Ready(Ok(()));
@@ -49,7 +74,7 @@ pub struct VerifyHostNameClientCertVerifier {
     host_name: String,
 }
 
-impl VerifyClientCertificateHandler for VerifyHostNameClientCertVerifier {
+impl VerifyHostNameCallback for VerifyHostNameClientCertVerifier {
     fn verify_host_name(&self, host_name: &str) -> bool {
         self.host_name == host_name
     }
@@ -65,7 +90,7 @@ impl VerifyHostNameClientCertVerifier {
 
 #[derive(Default)]
 pub struct RejectAllClientCertificatesHandler {}
-impl VerifyClientCertificateHandler for RejectAllClientCertificatesHandler {
+impl VerifyHostNameCallback for RejectAllClientCertificatesHandler {
     fn verify_host_name(&self, _host_name: &str) -> bool {
         false
     }
@@ -95,6 +120,15 @@ fn s2n_client_with_untrusted_client_auth() -> Result<client::Client, Error> {
         .build()
 }
 
+fn s2n_client_with_fixed_hostname_auth(host_name: &str) -> Result<client::Client, Error> {
+    client::Builder::default()
+        .with_certificate(CERT_PEM)
+        .unwrap()
+        .with_verify_host_name_callback(VerifyHostNameClientCertVerifier::new(host_name))
+        .unwrap()
+        .build()
+}
+
 fn s2n_server() -> server::Server {
     server::Builder::default()
         .with_certificate(CERT_PEM, KEY_PEM)
@@ -107,9 +141,7 @@ fn s2n_server_with_client_auth() -> Result<server::Server, Error> {
     server::Builder::default()
         .with_empty_trust_store()?
         .with_client_authentication()?
-        .with_verify_client_certificate_handler(VerifyHostNameClientCertVerifier::new(
-            "qlaws.qlaws",
-        ))?
+        .with_verify_host_name_callback(VerifyHostNameClientCertVerifier::new("qlaws.qlaws"))?
         .with_certificate(CERT_PEM, KEY_PEM)?
         .with_trusted_certificate(CERT_PEM)?
         .build()
@@ -119,7 +151,7 @@ fn s2n_server_with_client_auth_verifier_rejects_client_certs() -> Result<server:
     server::Builder::default()
         .with_empty_trust_store()?
         .with_client_authentication()?
-        .with_verify_client_certificate_handler(RejectAllClientCertificatesHandler::default())?
+        .with_verify_host_name_callback(RejectAllClientCertificatesHandler::default())?
         .with_certificate(CERT_PEM, KEY_PEM)?
         .with_trusted_certificate(CERT_PEM)?
         .build()
@@ -214,7 +246,7 @@ fn s2n_client_no_client_auth_s2n_server_requires_client_auth_test() {
     // but the client does not support it.
     assert!(test_result.is_err());
     let e = test_result.unwrap_err();
-    assert_eq!(e.description().unwrap(), "HANDSHAKE_FAILURE");
+    assert_eq!(e.description().unwrap(), "UNEXPECTED_MESSAGE");
 }
 
 #[test]
@@ -229,7 +261,7 @@ fn s2n_client_with_client_auth_s2n_server_does_not_require_client_auth_test() {
     // but the server does not support it.
     assert!(test_result.is_err());
     let e = test_result.unwrap_err();
-    assert_eq!(e.description().unwrap(), "HANDSHAKE_FAILURE");
+    assert_eq!(e.description().unwrap(), "UNEXPECTED_MESSAGE");
 }
 
 #[test]
@@ -262,6 +294,29 @@ fn s2n_client_with_client_auth_s2n_server_does_not_trust_issuer() {
     assert_eq!(e.description().unwrap(), "HANDSHAKE_FAILURE");
 }
 
+#[test]
+#[cfg_attr(miri, ignore)]
+fn s2n_client_with_custom_hostname_auth_rejects_server_name() {
+    let mut client_endpoint = s2n_client_with_fixed_hostname_auth("not-localhost").unwrap();
+    let mut server_endpoint = s2n_server();
+
+    let test_result = run_result(&mut server_endpoint, &mut client_endpoint, None);
+
+    // The handshake should fail because the hostname ("localhost") is not validated
+    assert!(test_result.is_err());
+    let e = test_result.unwrap_err();
+    assert_eq!(e.description().unwrap(), "HANDSHAKE_FAILURE");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn s2n_client_with_custom_hostname_auth_accepts_server_name() {
+    let mut client_endpoint = s2n_client_with_fixed_hostname_auth("localhost").unwrap();
+    let mut server_endpoint = s2n_server();
+
+    run_result(&mut server_endpoint, &mut client_endpoint, None).unwrap();
+}
+
 /// Executes the handshake to completion
 fn run_result<S: Endpoint, C: Endpoint>(
     server: &mut S,
@@ -285,4 +340,21 @@ fn run<S: Endpoint, C: Endpoint>(
     client_hello_cb_done: Option<Arc<AtomicBool>>,
 ) {
     run_result(server, client, client_hello_cb_done).unwrap();
+}
+
+#[test]
+fn config_loader() {
+    use crate::{ConfigLoader, Server};
+
+    let server = Server::default();
+
+    // make sure the loader can be a static type
+    let server: Server<Server> = Server::from_loader(server);
+
+    // make sure the loader can be a dynamic type
+    let server: Box<dyn ConfigLoader> = Box::new(server);
+    let mut server: Server<Box<dyn ConfigLoader>> = Server::from_loader(server);
+
+    // make sure the server can actually create a session
+    let _ = server.new_server_session(&1);
 }

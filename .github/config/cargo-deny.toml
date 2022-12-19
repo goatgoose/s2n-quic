@@ -4,16 +4,29 @@ unmaintained = "deny"
 notice = "deny"
 yanked = "deny"
 ignore = [
-    "RUSTSEC-2021-0127" # criterion (a test dependency) uses cbor for encoding
+    "RUSTSEC-2021-0139", # criterion, structopt, and tracing-subscriber (test dependencies) use ansi_term
 ]
 
 [bans]
 multiple-versions = "deny"
 
 skip-tree = [
-    { name = "bolero" }, # bolero is always going to be just a test dependency
-    { name = "criterion" }, # criterion is always going to be just a test dependency
-    { name = "cuckoofilter" }, # This dependency needs to be updated or removed (see https://github.com/axiomhq/rust-cuckoofilter/pull/53)
+    # This dependency needs to be updated or removed (see https://github.com/axiomhq/rust-cuckoofilter/pull/53)
+    { name = "cuckoofilter" },
+
+    # all of these are going to be just test dependencies
+    { name = "aes-gcm" },
+    { name = "bach" },
+    { name = "bolero" },
+    { name = "criterion" },
+    { name = "insta" },
+
+    # Ignore duplicate dependencies in private s2n-quic crates
+    { name = "s2n-quic-bench" },
+    { name = "s2n-quic-events" },
+    { name = "s2n-quic-h3" },
+    { name = "s2n-quic-qns" },
+    { name = "s2n-quic-sim" },
 ]
 
 [sources]
@@ -37,6 +50,7 @@ allow = [
     "ISC",
     "MIT",
     "OpenSSL",
+    "Unicode-DFS-2016",
     "Zlib",
 ]
 

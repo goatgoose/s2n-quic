@@ -10,11 +10,11 @@ use s2n_quic_core::{
     endpoint, transport,
 };
 use s2n_quic_crypto::Suite;
-use s2n_tls::raw::{
+use s2n_tls::{
     config::Config,
-    connection::{self, Connection},
+    connection::Connection,
+    enums::{Blinding, Mode},
     error::Error,
-    ffi::s2n_blinding,
 };
 
 #[derive(Debug)]
@@ -37,15 +37,15 @@ impl Session {
         server_name: Option<ServerName>,
     ) -> Result<Self, Error> {
         let mut connection = Connection::new(match endpoint {
-            endpoint::Type::Server => connection::Mode::Server,
-            endpoint::Type::Client => connection::Mode::Client,
+            endpoint::Type::Server => Mode::Server,
+            endpoint::Type::Client => Mode::Client,
         });
 
         connection.set_config(config)?;
         connection.enable_quic()?;
         connection.set_quic_transport_parameters(params)?;
         // QUIC handles sending alerts, so no need to apply TLS blinding
-        connection.set_blinding(s2n_blinding::SELF_SERVICE_BLINDING)?;
+        connection.set_blinding(Blinding::SelfService)?;
 
         if let Some(server_name) = server_name.as_ref() {
             connection
@@ -99,7 +99,7 @@ impl tls::Session for Session {
             callback.set(&mut self.connection);
         }
 
-        let result = self.connection.negotiate().map_ok(|_| ());
+        let result = self.connection.poll_negotiate().map_ok(|_| ());
 
         callback.unset(&mut self.connection)?;
 

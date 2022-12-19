@@ -110,7 +110,7 @@ pub(crate) struct MinRttWindowedFilter {
 
 //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#2.14.2
 //# A constant specifying the minimum time interval between ProbeRTT states: 5 secs.
-const PROBE_RTT_INTERVAL: Duration = Duration::from_secs(5);
+pub const PROBE_RTT_INTERVAL: Duration = Duration::from_secs(5);
 
 //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#2.14.1
 //# A constant specifying the length of the BBR.min_rtt min filter window,
@@ -129,6 +129,23 @@ impl MinRttWindowedFilter {
 
     /// Updates the min_probe_rtt and min_rtt estimates with the given `rtt`
     pub fn update(&mut self, rtt: Duration, now: Timestamp) {
+        //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.3.4.4
+        //# BBRUpdateMinRTT()
+        //#   BBR.probe_rtt_expired =
+        //#     Now() > BBR.probe_rtt_min_stamp + ProbeRTTInterval
+        //#   if (rs.rtt >= 0 and
+        //#       (rs.rtt < BBR.probe_rtt_min_delay or
+        //#        BBR.probe_rtt_expired))
+        //#      BBR.probe_rtt_min_delay = rs.rtt
+        //#      BBR.probe_rtt_min_stamp = Now()
+        //#
+        //#   min_rtt_expired =
+        //#     Now() > BBR.min_rtt_stamp + MinRTTFilterLen
+        //#   if (BBR.probe_rtt_min_delay < BBR.min_rtt or
+        //#       min_rtt_expired)
+        //#     BBR.min_rtt       = BBR.probe_rtt_min_delay
+        //#     BBR.min_rtt_stamp = BBR.probe_rtt_min_stamp
+
         self.probe_rtt_expired = self.min_probe_rtt.window_expired(now);
         self.min_probe_rtt.update(rtt, now);
 
@@ -163,6 +180,13 @@ impl MinRttWindowedFilter {
     /// the next `PROBE_RTT_INTERVAL`.
     pub fn schedule_next_probe_rtt(&mut self, now: Timestamp) {
         self.min_probe_rtt.last_updated = Some(now);
+    }
+
+    #[cfg(test)]
+    pub fn next_probe_rtt(&self) -> Option<Timestamp> {
+        self.min_probe_rtt
+            .last_updated
+            .map(|last_updated| last_updated + PROBE_RTT_INTERVAL)
     }
 }
 

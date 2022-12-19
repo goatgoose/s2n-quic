@@ -15,11 +15,8 @@ env:
   RUST_BACKTRACE: 1
   # Pin the nightly toolchain to prevent breakage.
   # This should be occasionally updated.
-  RUST_NIGHTLY_TOOLCHAIN: nightly-2022-04-12
+  RUST_NIGHTLY_TOOLCHAIN: nightly-2022-09-15
   CDN: https://dnglbrstg7yg.cloudfront.net
-  # enable unstable features for testing
-  S2N_UNSTABLE_CRYPTO_OPT_TX: 100
-  S2N_UNSTABLE_CRYPTO_OPT_RX: 100
 
 jobs:
   rustfmt:
@@ -46,7 +43,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, beta]
+        include:
+          - toolchain: stable
+            # fail on stable warnings
+            args: "-D warnings"
+          - toolchain: beta
     steps:
       - uses: actions/checkout@v3
 
@@ -65,7 +66,9 @@ jobs:
         uses: actions-rs/cargo@v1.0.3
         with:
           command: clippy
-          args: --manifest-path netbench/Cargo.toml --all-features --all-targets -- -D warnings
+          # deriving Eq may break API compatibility so we disable it
+          # See https://github.com/rust-lang/rust-clippy/issues/9063
+          args: --manifest-path netbench/Cargo.toml --all-features --all-targets -- -A clippy::derive_partial_eq_without_eq ${{ matrix.args }}
 
   test:
     runs-on: ubuntu-latest
@@ -150,6 +153,7 @@ jobs:
           - s2n-quic
           - native-tls
           - tcp
+          - s2n-tls
         scenario: ${{ fromJson(needs.build.outputs.scenarios) }}
     env:
       SCENARIO: scenarios/${{ matrix.scenario }}.json
@@ -176,13 +180,13 @@ jobs:
 
       - name: Run server
         run: |
-          sudo SCENARIO=$SCENARIO ./netbench-collector \
+          sudo SCENARIO=$SCENARIO S2N_UNSTABLE_CRYPTO_OPT_TX=1 S2N_UNSTABLE_CRYPTO_OPT_RX=1 ./netbench-collector \
             ./netbench-driver-${{ matrix.driver }}-server > results/${{ matrix.scenario }}/${{ matrix.driver }}/server.json &
 
       - name: Run client
         run: |
           export SERVER_0=localhost:4433
-          sudo SCENARIO=$SCENARIO SERVER_0=$SERVER_0 ./netbench-collector \
+          sudo SCENARIO=$SCENARIO SERVER_0=$SERVER_0 S2N_UNSTABLE_CRYPTO_OPT_TX=1 S2N_UNSTABLE_CRYPTO_OPT_RX=1 ./netbench-collector \
             ./netbench-driver-${{ matrix.driver }}-client > results/${{ matrix.scenario }}/${{ matrix.driver }}/client.json
 
       - uses: actions/upload-artifact@v3
@@ -210,7 +214,7 @@ jobs:
           name: netbench-report
           path: reports
 
-      - uses: aws-actions/configure-aws-credentials@v1.6.1
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -226,7 +230,7 @@ jobs:
           URL="$CDN/$TARGET/index.html"
           echo "::set-output name=URL::$URL"
 
-      - uses: ouzi-dev/commit-status-updater@v1.1.2
+      - uses: ouzi-dev/commit-status-updater@v2.0.1
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           name: "netbench / report"

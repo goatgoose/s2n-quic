@@ -93,6 +93,7 @@ impl IntoEvent<bool> for &crate::transport::parameters::MigrationSupport {
     }
 }
 
+#[builder_derive(derive(Copy))]
 struct Path<'a> {
     local_addr: SocketAddress<'a>,
     local_cid: ConnectionId<'a>,
@@ -103,6 +104,7 @@ struct Path<'a> {
 }
 
 #[derive(Clone)]
+#[builder_derive(derive(Copy))]
 struct ConnectionId<'a> {
     bytes: &'a [u8],
 }
@@ -136,6 +138,7 @@ impl_conn_id!(UnboundedId);
 impl_conn_id!(InitialId);
 
 #[derive(Clone)]
+#[builder_derive(derive(Copy))]
 enum SocketAddress<'a> {
     IpV4 { ip: &'a [u8; 4], port: u16 },
     IpV6 { ip: &'a [u8; 16], port: u16 },
@@ -276,13 +279,48 @@ impl IntoEvent<builder::DuplicatePacketError> for crate::packet::number::Sliding
     }
 }
 
+struct EcnCounts {
+    /// A variable-length integer representing the total number of packets
+    /// received with the ECT(0) codepoint.
+    ect_0_count: u64,
+
+    /// A variable-length integer representing the total number of packets
+    /// received with the ECT(1) codepoint.
+    ect_1_count: u64,
+
+    /// A variable-length integer representing the total number of packets
+    /// received with the CE codepoint.
+    ce_count: u64,
+}
+
+impl IntoEvent<builder::EcnCounts> for crate::frame::ack::EcnCounts {
+    fn into_event(self) -> builder::EcnCounts {
+        builder::EcnCounts {
+            ect_0_count: self.ect_0_count.into_event(),
+            ect_1_count: self.ect_1_count.into_event(),
+            ce_count: self.ce_count.into_event(),
+        }
+    }
+}
+
 //= https://tools.ietf.org/id/draft-marx-qlog-event-definitions-quic-h3-02#A.7
 enum Frame {
     Padding,
     Ping,
-    Ack,
-    ResetStream,
-    StopSending,
+    Ack {
+        ecn_counts: Option<EcnCounts>,
+        largest_acknowledged: u64,
+        ack_range_count: u64,
+    },
+    ResetStream {
+        id: u64,
+        error_code: u64,
+        final_size: u64,
+    },
+    StopSending {
+        id: u64,
+        error_code: u64,
+    },
     Crypto {
         offset: u64,
         len: u16,
@@ -294,15 +332,28 @@ enum Frame {
         len: u16,
         is_fin: bool,
     },
-    MaxData,
-    MaxStreamData,
+    MaxData {
+        value: u64,
+    },
+    MaxStreamData {
+        stream_type: StreamType,
+        id: u64,
+        value: u64,
+    },
     MaxStreams {
         stream_type: StreamType,
+        value: u64,
     },
-    DataBlocked,
-    StreamDataBlocked,
+    DataBlocked {
+        data_limit: u64,
+    },
+    StreamDataBlocked {
+        stream_id: u64,
+        stream_data_limit: u64,
+    },
     StreamsBlocked {
         stream_type: StreamType,
+        stream_limit: u64,
     },
     NewConnectionId,
     RetireConnectionId,
@@ -327,21 +378,34 @@ impl IntoEvent<builder::Frame> for &crate::frame::Ping {
     }
 }
 
-impl<AckRanges> IntoEvent<builder::Frame> for &crate::frame::Ack<AckRanges> {
+impl<AckRanges: crate::frame::ack::AckRanges> IntoEvent<builder::Frame>
+    for &crate::frame::Ack<AckRanges>
+{
     fn into_event(self) -> builder::Frame {
-        builder::Frame::Ack {}
+        builder::Frame::Ack {
+            ecn_counts: self.ecn_counts.map(|val| val.into_event()),
+            largest_acknowledged: self.largest_acknowledged().into_event(),
+            ack_range_count: self.ack_ranges().len() as u64,
+        }
     }
 }
 
 impl IntoEvent<builder::Frame> for &crate::frame::ResetStream {
     fn into_event(self) -> builder::Frame {
-        builder::Frame::ResetStream {}
+        builder::Frame::ResetStream {
+            id: self.stream_id.as_u64(),
+            error_code: self.application_error_code.as_u64(),
+            final_size: self.final_size.as_u64(),
+        }
     }
 }
 
 impl IntoEvent<builder::Frame> for &crate::frame::StopSending {
     fn into_event(self) -> builder::Frame {
-        builder::Frame::ResetStream {}
+        builder::Frame::StopSending {
+            id: self.stream_id.as_u64(),
+            error_code: self.application_error_code.as_u64(),
+        }
     }
 }
 
@@ -353,13 +417,21 @@ impl<'a> IntoEvent<builder::Frame> for &crate::frame::NewToken<'a> {
 
 impl IntoEvent<builder::Frame> for &crate::frame::MaxData {
     fn into_event(self) -> builder::Frame {
-        builder::Frame::MaxData {}
+        builder::Frame::MaxData {
+            value: self.maximum_data.as_u64(),
+        }
     }
 }
 
 impl IntoEvent<builder::Frame> for &crate::frame::MaxStreamData {
     fn into_event(self) -> builder::Frame {
-        builder::Frame::MaxStreamData {}
+        builder::Frame::MaxStreamData {
+            id: self.stream_id.as_u64(),
+            stream_type: crate::stream::StreamId::from_varint(self.stream_id)
+                .stream_type()
+                .into_event(),
+            value: self.maximum_stream_data.as_u64(),
+        }
     }
 }
 
@@ -367,19 +439,25 @@ impl IntoEvent<builder::Frame> for &crate::frame::MaxStreams {
     fn into_event(self) -> builder::Frame {
         builder::Frame::MaxStreams {
             stream_type: self.stream_type.into_event(),
+            value: self.maximum_streams.as_u64(),
         }
     }
 }
 
 impl IntoEvent<builder::Frame> for &crate::frame::DataBlocked {
     fn into_event(self) -> builder::Frame {
-        builder::Frame::DataBlocked {}
+        builder::Frame::DataBlocked {
+            data_limit: self.data_limit.as_u64(),
+        }
     }
 }
 
 impl IntoEvent<builder::Frame> for &crate::frame::StreamDataBlocked {
     fn into_event(self) -> builder::Frame {
-        builder::Frame::StreamDataBlocked {}
+        builder::Frame::StreamDataBlocked {
+            stream_id: self.stream_id.as_u64(),
+            stream_data_limit: self.stream_data_limit.as_u64(),
+        }
     }
 }
 
@@ -387,6 +465,7 @@ impl IntoEvent<builder::Frame> for &crate::frame::StreamsBlocked {
     fn into_event(self) -> builder::Frame {
         builder::Frame::StreamsBlocked {
             stream_type: self.stream_type.into_event(),
+            stream_limit: self.stream_limit.as_u64(),
         }
     }
 }
@@ -469,7 +548,7 @@ enum StreamType {
     Unidirectional,
 }
 
-impl<'a> IntoEvent<builder::StreamType> for &crate::stream::StreamType {
+impl IntoEvent<builder::StreamType> for &crate::stream::StreamType {
     fn into_event(self) -> builder::StreamType {
         match self {
             crate::stream::StreamType::Bidirectional => builder::StreamType::Bidirectional {},
@@ -502,15 +581,15 @@ impl builder::PacketHeader {
 
         match packet_number.space() {
             PacketNumberSpace::Initial => PacketHeader::Initial {
-                number: packet_number.as_u64(),
+                number: packet_number.into_event(),
                 version,
             },
             PacketNumberSpace::Handshake => PacketHeader::Handshake {
-                number: packet_number.as_u64(),
+                number: packet_number.into_event(),
                 version,
             },
             PacketNumberSpace::ApplicationData => PacketHeader::OneRtt {
-                number: packet_number.as_u64(),
+                number: packet_number.into_event(),
             },
         }
     }
@@ -650,6 +729,26 @@ enum PacketDropReason<'a> {
     },
 }
 
+#[deprecated(note = "use on_rx_ack_range_dropped event instead")]
+enum AckAction {
+    /// Ack range for received packets was dropped due to space constraints
+    ///
+    /// For the purpose of processing Acks, RX packet numbers are stored as
+    /// packet_number ranges in an IntervalSet; only lower and upper bounds
+    /// are stored instead of individual packet_numbers. Ranges are merged
+    /// when possible so only disjointed ranges are stored.
+    ///
+    /// When at `capacity`, the lowest packet_number range is dropped.
+    RxAckRangeDropped {
+        /// The packet number range which was dropped
+        packet_number_range: core::ops::RangeInclusive<u64>,
+        /// The number of disjoint ranges the IntervalSet can store
+        capacity: usize,
+        /// The store packet_number range in the IntervalSet
+        stored_range: core::ops::RangeInclusive<u64>,
+    },
+}
+
 enum RetryDiscardReason<'a> {
     /// Received a Retry packet with SCID field equal to DCID field.
     ScidEqualsDcid { cid: &'a [u8] },
@@ -731,4 +830,65 @@ impl CipherSuite {
 enum PathChallengeStatus {
     Validated,
     Abandoned,
+}
+
+/// The reason the slow start congestion controller state has been exited
+enum SlowStartExitCause {
+    /// A packet was determined lost
+    PacketLoss,
+    /// An Explicit Congestion Notification: Congestion Experienced marking was received
+    Ecn,
+    /// The round trip time estimate was updated
+    Rtt,
+    /// Slow Start exited due to a reason other than those above
+    ///
+    /// With the Cubic congestion controller, this reason is used after the initial exiting of
+    /// Slow Start, when the previously determined Slow Start threshold is exceed by the
+    /// congestion window.
+    Other,
+}
+
+/// The reason the MTU was updated
+enum MtuUpdatedCause {
+    /// The MTU was initialized with the default value
+    NewPath,
+    /// An MTU probe was acknowledged by the peer
+    ProbeAcknowledged,
+    /// A blackhole was detected
+    Blackhole,
+}
+
+/// A bandwidth delivery rate estimate with associated metadata
+struct RateSample {
+    /// The length of the sampling interval
+    interval: Duration,
+    /// The amount of data in bytes marked as delivered over the sampling interval
+    delivered_bytes: u64,
+    /// The amount of data in bytes marked as lost over the sampling interval
+    lost_bytes: u64,
+    /// The number of packets marked as explicit congestion experienced over the sampling interval
+    ecn_ce_count: u64,
+    /// PacketInfo::is_app_limited from the most recent acknowledged packet
+    is_app_limited: bool,
+    /// PacketInfo::delivered_bytes from the most recent acknowledged packet
+    prior_delivered_bytes: u64,
+    /// PacketInfo::bytes_in_flight from the most recent acknowledged packet
+    bytes_in_flight: u32,
+    /// PacketInfo::lost_bytes from the most recent acknowledged packet
+    prior_lost_bytes: u64,
+    /// PacketInfo::ecn_ce_count from the most recent acknowledged packet
+    prior_ecn_ce_count: u64,
+    /// The delivery rate for this rate sample
+    delivery_rate_bytes_per_second: u64,
+}
+
+// The BBR congestion controller State
+enum BbrState {
+    Startup,
+    Drain,
+    ProbeBwDown,
+    ProbeBwCruise,
+    ProbeBwRefill,
+    ProbeBwUp,
+    ProbeRtt,
 }

@@ -17,6 +17,9 @@ pub mod ack_elicitation;
 pub mod congestion_controlled;
 pub mod path_validation;
 
+#[cfg(test)]
+mod tests;
+
 //= https://www.rfc-editor.org/rfc/rfc9000#section-19
 //# As described in Section 12.4, packets contain one or more frames.
 //# This section describes the format and semantics of the core QUIC
@@ -62,6 +65,7 @@ macro_rules! frames {
 
         impl<'a, $ack, $data> event::IntoEvent<event::builder::Frame> for &Frame<'a, $ack, $data>
         where
+            $ack: crate::frame::ack::AckRanges,
             $data: EncoderValue,
         {
             #[inline]

@@ -28,13 +28,14 @@ use s2n_quic_core::{
         InitialId, LocalId, PeerId,
     },
     crypto::{tls, tls::Endpoint as _, CryptoSuite, InitialKey},
+    datagram::{Endpoint as DatagramEndpoint, PreConnectionInfo},
     endpoint::{limits::Outcome, Limiter as _},
     event::{
         self, supervisor, ConnectionPublisher, EndpointPublisher as _, IntoEvent, Subscriber as _,
     },
     inet::{datagram, DatagramInfo},
     io::{rx, tx},
-    packet::{initial::ProtectedInitial, ProtectedPacket},
+    packet::{initial::ProtectedInitial, interceptor::Interceptor, ProtectedPacket},
     path,
     path::{Handle as _, MaxMtu},
     random::Generator as _,
@@ -118,22 +119,6 @@ impl<Cfg: Config> s2n_quic_core::endpoint::Endpoint for Endpoint<Cfg> {
                 self.receive_datagram(&header, payload, timestamp)
             }
         }
-
-        // TODO process pending acks
-        // let endpoint_context = self.config.context();
-        // // process ACKs on Connections with interest
-        // self.connections.iterate_ack_list(|connection| {
-        //     let timestamp = match now {
-        //         Some(time) => time,
-        //         None => {
-        //             now = Some(clock.get_time());
-        //             now.expect("value should be set")
-        //         }
-        //     };
-        //
-        //     // handle error and potentially close the connection
-        //     connection.on_pending_ack_ranges(timestamp, endpoint_context.event_subscriber);
-        // });
 
         let len = entries.len();
         queue.finish(len);
@@ -385,7 +370,6 @@ impl<Cfg: Config> Endpoint<Cfg> {
                 self.retry_dispatch.queue::<
                     _,
                     <<<Cfg as Config>::TLSEndpoint as tls::Endpoint>::Session as CryptoSuite>::RetryKey,
-                    _,
                 >(
                     header.path,
                     packet,
@@ -443,6 +427,23 @@ impl<Cfg: Config> Endpoint<Cfg> {
         // Try to decode the first packet in the datagram
         let payload_len = payload.len();
         let buffer = DecoderBufferMut::new(payload);
+
+        let buffer = {
+            let subject = event::builder::Subject::Endpoint {}.into_event();
+            let remote_address = header.path.remote_address();
+            let local_address = header.path.local_address();
+
+            let datagram = s2n_quic_core::packet::interceptor::Datagram {
+                remote_address: remote_address.into_event(),
+                local_address: local_address.into_event(),
+                timestamp,
+            };
+
+            endpoint_context
+                .packet_interceptor
+                .intercept_rx_datagram(&subject, &datagram, buffer)
+        };
+
         let connection_info = ConnectionInfo::new(&remote_address);
         let (packet, remaining) = if let Ok((packet, remaining)) = ProtectedPacket::decode(
             buffer,
@@ -1070,6 +1071,12 @@ impl<Cfg: Config> Endpoint<Cfg> {
             .connection_limits
             .on_connection(&LimitsInfo::new(&remote_address));
         transport_parameters.load_limits(&limits);
+
+        transport_parameters.max_datagram_frame_size = endpoint_context
+            .datagram
+            .max_datagram_frame_size(&PreConnectionInfo::new())
+            .try_into()
+            .expect("Failed to convert max_datagram_frame_size");
 
         transport_parameters.active_connection_id_limit = s2n_quic_core::varint::VarInt::from(
             connection::peer_id_registry::ACTIVE_CONNECTION_ID_LIMIT,

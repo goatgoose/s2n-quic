@@ -33,6 +33,7 @@ use s2n_quic_core::{
         ProtectedPacket,
     },
     path::{Handle as _, MaxMtu},
+    query,
     time::Timestamp,
 };
 
@@ -96,13 +97,6 @@ pub trait ConnectionTrait: 'static + Send + Sized {
         timestamp: Timestamp,
         supervisor_context: &supervisor::Context,
         random_generator: &mut <Self::Config as endpoint::Config>::RandomGenerator,
-        subscriber: &mut <Self::Config as endpoint::Config>::EventSubscriber,
-    ) -> Result<(), connection::Error>;
-
-    /// Process pendings ACKs for the `Connection`.
-    fn on_pending_ack_ranges(
-        &mut self,
-        timestamp: Timestamp,
         subscriber: &mut <Self::Config as endpoint::Config>::EventSubscriber,
     ) -> Result<(), connection::Error>;
 
@@ -450,9 +444,11 @@ pub trait ConnectionTrait: 'static + Send + Sized {
 
     fn error(&self) -> Option<connection::Error>;
 
-    fn query_event_context(&self, query: &mut dyn event::query::Query);
+    fn query_event_context(&self, query: &mut dyn query::Query);
 
-    fn query_event_context_mut(&mut self, query: &mut dyn event::query::QueryMut);
+    fn query_event_context_mut(&mut self, query: &mut dyn query::QueryMut);
+
+    fn datagram_mut(&mut self, query: &mut dyn query::QueryMut);
 
     fn with_event_publisher<F>(
         &mut self,

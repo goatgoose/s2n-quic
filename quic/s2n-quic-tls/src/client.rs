@@ -6,18 +6,20 @@ use crate::{
     keylog::KeyLogHandle,
     params::Params,
     session::Session,
+    ConfigLoader,
 };
 use s2n_codec::EncoderValue;
 use s2n_quic_core::{application::ServerName, crypto::tls, endpoint};
-use s2n_tls::raw::{
+use s2n_tls::{
+    callbacks::VerifyHostNameCallback,
     config::{self, Config},
+    enums::ClientAuthType,
     error::Error,
-    ffi::s2n_cert_auth_type,
 };
 use std::sync::Arc;
 
-pub struct Client {
-    config: Config,
+pub struct Client<L: ConfigLoader = Config> {
+    loader: L,
     #[allow(dead_code)] // we need to hold on to the handle to ensure it is cleaned up correctly
     keylog: Option<KeyLogHandle>,
     params: Params,
@@ -29,11 +31,35 @@ impl Client {
     }
 }
 
+impl<L: ConfigLoader> Client<L> {
+    /// Creates a [`Client`] from a [`ConfigLoader`]
+    ///
+    /// The caller is responsible for building the `Config`
+    /// correctly for QUIC settings. This includes:
+    /// * setting a security policy that supports TLS 1.3
+    /// * enabling QUIC support
+    /// * setting at least one application protocol
+    pub fn from_loader(loader: L) -> Self {
+        Self {
+            loader,
+            keylog: None,
+            params: Default::default(),
+        }
+    }
+}
+
 impl Default for Client {
     fn default() -> Self {
         Self::builder()
             .build()
             .expect("could not create a default client")
+    }
+}
+
+impl<L: ConfigLoader> ConfigLoader for Client<L> {
+    #[inline]
+    fn load(&mut self, cx: crate::ConnectionContext) -> s2n_tls::config::Config {
+        self.loader.load(cx)
     }
 }
 
@@ -48,9 +74,7 @@ impl Default for Builder {
         config.enable_quic().unwrap();
         // https://github.com/aws/s2n-tls/blob/main/docs/USAGE-GUIDE.md#s2n_config_set_cipher_preferences
         config.set_security_policy(crate::DEFAULT_POLICY).unwrap();
-        config
-            .set_application_protocol_preference(&[b"h3"])
-            .unwrap();
+        config.set_application_protocol_preference([b"h3"]).unwrap();
 
         Self {
             config,
@@ -114,8 +138,21 @@ impl Builder {
                 .as_pem()
                 .expect("pem is currently the only certificate format supported"),
         )?;
-        self.config
-            .set_client_auth_type(s2n_cert_auth_type::REQUIRED)?;
+        self.config.set_client_auth_type(ClientAuthType::Required)?;
+        Ok(self)
+    }
+
+    /// Set the host name verification callback.
+    ///
+    /// This will be invoked when a server certificate is presented during a TLS
+    /// handshake. If this function is invoked, the default server name validation
+    /// logic is disabled; this should only be used in very specific cases where normal
+    /// TLS hostname validation is not appropriate.
+    pub fn with_verify_host_name_callback<T: 'static + VerifyHostNameCallback>(
+        mut self,
+        handler: T,
+    ) -> Result<Self, Error> {
+        self.config.set_verify_host_callback(handler)?;
         Ok(self)
     }
 
@@ -146,14 +183,14 @@ impl Builder {
 
     pub fn build(self) -> Result<Client, Error> {
         Ok(Client {
-            config: self.config.build()?,
+            loader: self.config.build()?,
             keylog: self.keylog,
             params: Default::default(),
         })
     }
 }
 
-impl tls::Endpoint for Client {
+impl<L: ConfigLoader> tls::Endpoint for Client<L> {
     type Session = Session;
 
     fn new_server_session<Params: EncoderValue>(&mut self, _params: &Params) -> Self::Session {
@@ -165,7 +202,9 @@ impl tls::Endpoint for Client {
         params: &Params,
         server_name: ServerName,
     ) -> Self::Session {
-        let config = self.config.clone();
+        let config = self.loader.load(crate::ConnectionContext {
+            server_name: Some(&server_name),
+        });
         self.params.with(params, |params| {
             Session::new(endpoint::Type::Client, config, params, Some(server_name)).unwrap()
         })

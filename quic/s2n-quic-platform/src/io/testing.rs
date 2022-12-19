@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::select::{self, Select};
-use bach::{
-    executor::{self, JoinHandle},
-    time::scheduler,
-};
+use bach::time::scheduler;
 use core::{pin::Pin, task::Poll};
-use s2n_quic_core::{endpoint::Endpoint, inet::SocketAddress};
+use s2n_quic_core::{
+    endpoint::Endpoint,
+    event::{self, EndpointPublisher as _},
+    inet::SocketAddress,
+};
 
 type Error = std::io::Error;
 type Result<T = (), E = Error> = core::result::Result<T, E>;
@@ -20,7 +21,7 @@ pub use model::Model;
 pub use network::{Network, PathHandle};
 pub use time::now;
 
-pub use bach::task::{spawn, spawn_primary};
+pub use bach::task::{self, primary, spawn};
 
 pub mod rand {
     pub use ::bach::rand::*;
@@ -45,10 +46,14 @@ pub mod rand {
         }
 
         #[inline]
-        fn gen_range(&mut self, range: core::ops::Range<usize>) -> usize {
+        fn gen_range(&mut self, range: core::ops::Range<u64>) -> u64 {
             gen_range(range)
         }
     }
+}
+
+pub mod executor {
+    pub use bach::executor::{Handle, JoinHandle};
 }
 
 pub struct Executor<N: Network> {
@@ -86,6 +91,21 @@ impl<N: Network> Executor<N> {
     pub fn run(&mut self) {
         self.executor.block_on_primary();
     }
+
+    pub fn close(&mut self) {
+        // close the environment, which notifies all of the tasks that we're shutting down
+        self.executor.environment().close(|| {});
+        while self.executor.macrostep() > 0 {}
+
+        // then close the actual executor
+        self.executor.close()
+    }
+}
+
+impl<N: Network> Drop for Executor<N> {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 struct Env<N> {
@@ -100,6 +120,22 @@ struct Env<N> {
 impl<N> Env<N> {
     fn enter<F: FnOnce() -> O, O>(&self, f: F) -> O {
         self.handle.enter(|| self.time.enter(|| self.rand.enter(f)))
+    }
+
+    fn close<F: FnOnce()>(&mut self, f: F) {
+        let handle = &mut self.handle;
+        let rand = &mut self.rand;
+        let time = &mut self.time;
+        let buffers = &mut self.buffers;
+        handle.enter(|| {
+            rand.enter(|| {
+                time.close();
+                time.enter(|| {
+                    buffers.close();
+                    f();
+                });
+            })
+        })
     }
 }
 
@@ -160,9 +196,18 @@ impl<N: Network> bach::executor::Environment for Env<N> {
         while let Some(time) = self.time.advance() {
             let _ = time;
             if self.time.wake() > 0 {
+                // if a task has woken, then reset the stall count
+                self.stalled_iterations = 0;
                 break;
             }
         }
+    }
+
+    fn close<F>(&mut self, close: F)
+    where
+        F: 'static + FnOnce() + Send,
+    {
+        Self::close(self, close)
     }
 }
 
@@ -200,7 +245,7 @@ impl Io {
     pub fn start<E: Endpoint<PathHandle = network::PathHandle>>(
         self,
         endpoint: E,
-    ) -> Result<(JoinHandle<()>, SocketAddress)> {
+    ) -> Result<(executor::JoinHandle<()>, SocketAddress)> {
         let Builder {
             handle: Handle { executor, buffers },
             address,
@@ -248,15 +293,33 @@ impl<E: Endpoint<PathHandle = network::PathHandle>> Instance<E> {
 
             let select::Outcome {
                 rx_result,
-                tx_result: _,
-                timeout_expired: _,
-                application_wakeup: _,
+                tx_result,
+                timeout_expired,
+                application_wakeup,
             } = if let Ok(res) = Select::new(io_task, empty_task, &mut wakeups, &mut timer).await {
                 res
             } else {
                 // The endpoint has shut down
                 return;
             };
+
+            let wakeup_timestamp = time::now();
+            let subscriber = endpoint.subscriber();
+            let mut publisher = event::EndpointPublisherSubscriber::new(
+                event::builder::EndpointMeta {
+                    endpoint_type: E::ENDPOINT_TYPE,
+                    timestamp: wakeup_timestamp,
+                },
+                None,
+                subscriber,
+            );
+
+            publisher.on_platform_event_loop_wakeup(event::builder::PlatformEventLoopWakeup {
+                timeout_expired,
+                rx_ready: rx_result.is_some(),
+                tx_ready: tx_result.is_some(),
+                application_wakeup,
+            });
 
             if let Some(result) = rx_result {
                 if result.is_err() {

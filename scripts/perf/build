@@ -19,7 +19,7 @@ if [ ! -f target/perf/quinn/bin/perf_client ] || [ ! -f target/perf/quinn/bin/pe
   mkdir -p target/perf/quinn
   cargo +stable install \
     --git https://github.com/quinn-rs/quinn \
-    --rev 7b4b4c31e5878bdbce56ab2737dd8cfbafe1c4db \
+    --rev 6e4bcbb2fcb57ced2ef261c9662521c5baf37f3c \
     --bin perf_client \
     --bin perf_server \
     --root target/perf/quinn \
@@ -27,7 +27,7 @@ if [ ! -f target/perf/quinn/bin/perf_client ] || [ ! -f target/perf/quinn/bin/pe
     perf
 fi
 
-RUSTFLAGS="-g" cargo \
+RUSTFLAGS="-g --cfg s2n_quic_unstable" cargo \
   +stable \
   build \
   --bin s2n-quic-qns \

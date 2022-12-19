@@ -9,7 +9,7 @@ use crate::{
         AckDelayExponent, ActiveConnectionIdLimit, InitialFlowControlLimits, InitialMaxData,
         InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni,
         InitialMaxStreamsBidi, InitialMaxStreamsUni, InitialStreamLimits, MaxAckDelay,
-        MaxIdleTimeout, TransportParameters,
+        MaxDatagramFrameSize, MaxIdleTimeout, TransportParameters,
     },
 };
 use core::{convert::TryInto, time::Duration};
@@ -51,17 +51,19 @@ pub struct Limits {
     pub(crate) bidirectional_local_data_window: InitialMaxStreamDataBidiLocal,
     pub(crate) bidirectional_remote_data_window: InitialMaxStreamDataBidiRemote,
     pub(crate) unidirectional_data_window: InitialMaxStreamDataUni,
-    pub(crate) max_open_bidirectional_streams: InitialMaxStreamsBidi,
-    pub(crate) max_open_local_unidirectional_streams: InitialMaxStreamsUni,
+    pub(crate) max_open_local_bidirectional_streams: stream::limits::LocalBidirectional,
+    pub(crate) max_open_local_unidirectional_streams: stream::limits::LocalUnidirectional,
+    pub(crate) max_open_remote_bidirectional_streams: InitialMaxStreamsBidi,
     pub(crate) max_open_remote_unidirectional_streams: InitialMaxStreamsUni,
     pub(crate) max_ack_delay: MaxAckDelay,
     pub(crate) ack_delay_exponent: AckDelayExponent,
     pub(crate) max_active_connection_ids: ActiveConnectionIdLimit,
     pub(crate) ack_elicitation_interval: u8,
     pub(crate) ack_ranges_limit: u8,
-    pub(crate) max_send_buffer_size: u32,
+    pub(crate) max_send_buffer_size: stream::limits::MaxSendBufferSize,
     pub(crate) max_handshake_duration: Duration,
     pub(crate) max_keep_alive_period: Duration,
+    pub(crate) max_datagram_frame_size: MaxDatagramFrameSize,
 }
 
 impl Default for Limits {
@@ -87,8 +89,9 @@ impl Limits {
             bidirectional_local_data_window: InitialMaxStreamDataBidiLocal::RECOMMENDED,
             bidirectional_remote_data_window: InitialMaxStreamDataBidiRemote::RECOMMENDED,
             unidirectional_data_window: InitialMaxStreamDataUni::RECOMMENDED,
-            max_open_bidirectional_streams: InitialMaxStreamsBidi::RECOMMENDED,
-            max_open_local_unidirectional_streams: InitialMaxStreamsUni::RECOMMENDED,
+            max_open_local_bidirectional_streams: stream::limits::LocalBidirectional::RECOMMENDED,
+            max_open_local_unidirectional_streams: stream::limits::LocalUnidirectional::RECOMMENDED,
+            max_open_remote_bidirectional_streams: InitialMaxStreamsBidi::RECOMMENDED,
             max_open_remote_unidirectional_streams: InitialMaxStreamsUni::RECOMMENDED,
             max_ack_delay: MaxAckDelay::RECOMMENDED,
             ack_delay_exponent: AckDelayExponent::RECOMMENDED,
@@ -98,6 +101,7 @@ impl Limits {
             max_send_buffer_size: stream::Limits::RECOMMENDED.max_send_buffer_size,
             max_handshake_duration: MAX_HANDSHAKE_DURATION_DEFAULT,
             max_keep_alive_period: MAX_KEEP_ALIVE_PERIOD_DEFAULT,
+            max_datagram_frame_size: MaxDatagramFrameSize::DEFAULT,
         }
     }
 
@@ -118,11 +122,42 @@ impl Limits {
         unidirectional_data_window,
         u64
     );
-    setter!(
-        with_max_open_bidirectional_streams,
-        max_open_bidirectional_streams,
-        u64
-    );
+
+    /// Sets both the max local and remote limits for bidirectional streams.
+    #[deprecated(
+        note = "use with_max_open_local_bidirectional_streams and with_max_open_remote_bidirectional_streams instead"
+    )]
+    pub fn with_max_open_bidirectional_streams(
+        mut self,
+        value: u64,
+    ) -> Result<Self, ValidationError> {
+        self.max_open_local_bidirectional_streams = value.try_into()?;
+        self.max_open_remote_bidirectional_streams = value.try_into()?;
+        Ok(self)
+    }
+
+    /// Sets the max local limits for bidirectional streams
+    ///
+    /// The value set is used instead of `with_max_open_bidirectional_streams` when set.
+    pub fn with_max_open_local_bidirectional_streams(
+        mut self,
+        value: u64,
+    ) -> Result<Self, ValidationError> {
+        self.max_open_local_bidirectional_streams = value.try_into()?;
+        Ok(self)
+    }
+
+    /// Sets the max remote limits for bidirectional streams.
+    ///
+    /// The value set is used instead of `with_max_open_bidirectional_streams` when set.
+    pub fn with_max_open_remote_bidirectional_streams(
+        mut self,
+        value: u64,
+    ) -> Result<Self, ValidationError> {
+        self.max_open_remote_bidirectional_streams = value.try_into()?;
+        Ok(self)
+    }
+
     setter!(
         with_max_open_local_unidirectional_streams,
         max_open_local_unidirectional_streams,
@@ -152,12 +187,14 @@ impl Limits {
     // internal APIs
 
     #[doc(hidden)]
+    #[inline]
     pub fn load_peer<A, B, C, D>(&mut self, peer_parameters: &TransportParameters<A, B, C, D>) {
         self.max_idle_timeout
             .load_peer(&peer_parameters.max_idle_timeout);
     }
 
     #[doc(hidden)]
+    #[inline]
     pub const fn ack_settings(&self) -> ack::Settings {
         ack::Settings {
             ack_delay_exponent: self.ack_delay_exponent.as_u8(),
@@ -168,16 +205,22 @@ impl Limits {
     }
 
     #[doc(hidden)]
+    #[inline]
     pub const fn initial_flow_control_limits(&self) -> InitialFlowControlLimits {
         InitialFlowControlLimits {
             stream_limits: self.initial_stream_limits(),
             max_data: self.data_window.as_varint(),
-            max_streams_bidi: self.max_open_bidirectional_streams.as_varint(),
-            max_streams_uni: self.max_open_remote_unidirectional_streams.as_varint(),
+            max_open_remote_bidirectional_streams: self
+                .max_open_remote_bidirectional_streams
+                .as_varint(),
+            max_open_remote_unidirectional_streams: self
+                .max_open_remote_unidirectional_streams
+                .as_varint(),
         }
     }
 
     #[doc(hidden)]
+    #[inline]
     pub const fn initial_stream_limits(&self) -> InitialStreamLimits {
         InitialStreamLimits {
             max_data_bidi_local: self.bidirectional_local_data_window.as_varint(),
@@ -187,26 +230,29 @@ impl Limits {
     }
 
     #[doc(hidden)]
-    pub const fn stream_limits(&self) -> stream::Limits {
+    #[inline]
+    pub fn stream_limits(&self) -> stream::Limits {
         stream::Limits {
             max_send_buffer_size: self.max_send_buffer_size,
-            max_open_local_unidirectional_streams: self
-                .max_open_local_unidirectional_streams
-                .as_varint(),
+            max_open_local_unidirectional_streams: self.max_open_local_unidirectional_streams,
+            max_open_local_bidirectional_streams: self.max_open_local_bidirectional_streams,
         }
     }
 
     #[doc(hidden)]
+    #[inline]
     pub fn max_idle_timeout(&self) -> Option<Duration> {
         self.max_idle_timeout.as_duration()
     }
 
     #[doc(hidden)]
+    #[inline]
     pub fn max_handshake_duration(&self) -> Duration {
         self.max_handshake_duration
     }
 
     #[doc(hidden)]
+    #[inline]
     pub fn max_keep_alive_period(&self) -> Duration {
         self.max_keep_alive_period
     }

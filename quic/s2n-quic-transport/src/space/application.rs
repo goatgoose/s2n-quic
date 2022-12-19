@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    ack::{pending_ack_ranges::PendingAckRanges, AckManager},
+    ack::AckManager,
     connection::{self, ConnectionTransmissionContext, ProcessingError},
     endpoint, path,
     path::{path_event, Path},
@@ -12,19 +12,19 @@ use crate::{
     stream::AbstractStreamManager,
     sync::flag,
     transmission,
+    transmission::interest::Provider,
 };
 use core::{convert::TryInto, fmt, marker::PhantomData};
 use once_cell::sync::OnceCell;
 use s2n_codec::EncoderBuffer;
 use s2n_quic_core::{
     crypto::{application::KeySet, limited, tls, CryptoSuite},
-    datagram::Endpoint,
     event::{self, ConnectionPublisher as _, IntoEvent},
     frame::{
-        self, ack::AckRanges, crypto::CryptoRef, stream::StreamRef, Ack, ConnectionClose,
-        DataBlocked, HandshakeDone, MaxData, MaxStreamData, MaxStreams, NewConnectionId, NewToken,
-        PathChallenge, PathResponse, ResetStream, RetireConnectionId, StopSending,
-        StreamDataBlocked, StreamsBlocked,
+        ack::AckRanges, crypto::CryptoRef, datagram::DatagramRef, stream::StreamRef, Ack,
+        ConnectionClose, DataBlocked, HandshakeDone, MaxData, MaxStreamData, MaxStreams,
+        NewConnectionId, NewToken, PathChallenge, PathResponse, ResetStream, RetireConnectionId,
+        StopSending, StreamDataBlocked, StreamsBlocked,
     },
     inet::DatagramInfo,
     packet::{
@@ -47,8 +47,6 @@ pub struct ApplicationSpace<Config: endpoint::Config> {
     /// The current state of the Spin bit
     /// TODO: Spin me
     pub spin_bit: SpinBit,
-    /// Aggregate ACK info stored for delayed processing
-    pub pending_ack_ranges: PendingAckRanges,
     /// The crypto suite for application data
     /// TODO: What about ZeroRtt?
     //= https://www.rfc-editor.org/rfc/rfc9001#section-6.3
@@ -65,7 +63,7 @@ pub struct ApplicationSpace<Config: endpoint::Config> {
     keep_alive: KeepAlive,
     processed_packet_numbers: SlidingWindow,
     recovery_manager: recovery::Manager<Config>,
-    datagram_manager: datagram::Manager<Config>,
+    pub datagram_manager: datagram::Manager<Config>,
 }
 
 impl<Config: endpoint::Config> fmt::Debug for ApplicationSpace<Config> {
@@ -91,8 +89,7 @@ impl<Config: endpoint::Config> ApplicationSpace<Config> {
         ack_manager: AckManager,
         keep_alive: KeepAlive,
         max_mtu: MaxMtu,
-        datagram_sender: <<Config as endpoint::Config>::DatagramEndpoint as Endpoint>::Sender,
-        datagram_receiver: <<Config as endpoint::Config>::DatagramEndpoint as Endpoint>::Receiver,
+        datagram_manager: datagram::Manager<Config>,
     ) -> Self {
         let key_set = KeySet::new(key, Self::key_limits(max_mtu));
 
@@ -100,7 +97,6 @@ impl<Config: endpoint::Config> ApplicationSpace<Config> {
             tx_packet_numbers: TxPacketNumbers::new(PacketNumberSpace::ApplicationData, now),
             ack_manager,
             spin_bit: SpinBit::Zero,
-            pending_ack_ranges: PendingAckRanges::default(),
             stream_manager,
             key_set,
             header_key,
@@ -108,7 +104,7 @@ impl<Config: endpoint::Config> ApplicationSpace<Config> {
             keep_alive,
             processed_packet_numbers: SlidingWindow::default(),
             recovery_manager: recovery::Manager::new(PacketNumberSpace::ApplicationData),
-            datagram_manager: datagram::Manager::new(datagram_sender, datagram_receiver),
+            datagram_manager,
         }
     }
 
@@ -215,7 +211,9 @@ impl<Config: endpoint::Config> ApplicationSpace<Config> {
         outcome.bytes_progressed +=
             (self.stream_manager.outgoing_bytes_progressed() - bytes_progressed).as_u64() as usize;
 
-        let (recovery_manager, mut recovery_context, _) = self.recovery(
+        let app_limited = self.is_app_limited(context.path(), outcome.bytes_sent);
+
+        let (recovery_manager, mut recovery_context) = self.recovery(
             handshake_status,
             context.local_id_registry,
             context.path_id,
@@ -226,6 +224,8 @@ impl<Config: endpoint::Config> ApplicationSpace<Config> {
             outcome,
             context.timestamp,
             context.ecn,
+            context.transmission_mode,
+            Some(app_limited),
             &mut recovery_context,
             context.publisher,
         );
@@ -324,7 +324,7 @@ impl<Config: endpoint::Config> ApplicationSpace<Config> {
             "Clients are never in an anti-amplification state"
         );
 
-        //= https://www.rfc-editor.org/rfc/rfc9002#section-A.6
+        //= https://www.rfc-editor.org/rfc/rfc9002#appendix-A.6
         //# When a server is blocked by anti-amplification limits, receiving a
         //# datagram unblocks it, even if none of the packets in the datagram are
         //# successfully processed.  In such a case, the PTO timer will need to
@@ -366,20 +366,21 @@ impl<Config: endpoint::Config> ApplicationSpace<Config> {
         path_manager: &mut path::Manager<Config>,
         handshake_status: &mut HandshakeStatus,
         local_id_registry: &mut connection::LocalIdRegistry,
+        random_generator: &mut Config::RandomGenerator,
         timestamp: Timestamp,
         publisher: &mut Pub,
     ) {
         self.ack_manager.on_timeout(timestamp);
         self.key_set.on_timeout(timestamp);
 
-        let (recovery_manager, mut context, _) = self.recovery(
+        let (recovery_manager, mut context) = self.recovery(
             handshake_status,
             local_id_registry,
             path_manager.active_path_id(),
             path_manager,
         );
 
-        recovery_manager.on_timeout(timestamp, &mut context, publisher);
+        recovery_manager.on_timeout(timestamp, random_generator, &mut context, publisher);
 
         self.stream_manager.on_timeout(timestamp);
 
@@ -421,7 +422,6 @@ impl<Config: endpoint::Config> ApplicationSpace<Config> {
     ) -> (
         &'a mut recovery::Manager<Config>,
         RecoveryContext<'a, Config>,
-        &'a mut PendingAckRanges,
     ) {
         (
             &mut self.recovery_manager,
@@ -435,8 +435,15 @@ impl<Config: endpoint::Config> ApplicationSpace<Config> {
                 path_manager,
                 tx_packet_numbers: &mut self.tx_packet_numbers,
             },
-            &mut self.pending_ack_ranges,
         )
+    }
+
+    /// Returns `true` if sending is limited by the application and not the congestion controller
+    ///
+    /// Sending is app limited if the application is not fully utilizing the available
+    /// congestion window currently and there is no more application data remaining to send.
+    fn is_app_limited(&self, path: &Path<Config>, bytes_sent: usize) -> bool {
+        !path.is_congestion_limited(bytes_sent) && !self.has_transmission_interest()
     }
 
     /// Validate packets in the Application packet space
@@ -549,47 +556,6 @@ impl<Config: endpoint::Config> ApplicationSpace<Config> {
         };
 
         limits
-    }
-
-    // Store ACKs in PendingAckRanges for delayed processing
-    //
-    // Returns `Err` if the range was not inserted.
-    pub fn update_pending_acks<A: frame::ack::AckRanges>(
-        &mut self,
-        frame: &frame::Ack<A>,
-        pending_ack_ranges: &mut PendingAckRanges,
-    ) -> Result<(), ()> {
-        let range = frame.ack_ranges().into_iter().map(|f| {
-            PacketNumberRange::new(
-                PacketNumberSpace::ApplicationData.new_packet_number(*f.start()),
-                PacketNumberSpace::ApplicationData.new_packet_number(*f.end()),
-            )
-        });
-        pending_ack_ranges.extend(range, frame.ecn_counts, frame.ack_delay())
-    }
-
-    pub fn on_pending_ack_ranges<Pub: event::ConnectionPublisher>(
-        &mut self,
-        timestamp: Timestamp,
-        path_id: path::Id,
-        path_manager: &mut path::Manager<Config>,
-        handshake_status: &mut HandshakeStatus,
-        local_id_registry: &mut connection::LocalIdRegistry,
-        publisher: &mut Pub,
-    ) -> Result<(), transport::Error> {
-        debug_assert!(
-            !self.pending_ack_ranges.is_empty(),
-            "pending_ack_ranges should be non-empty since connection indicated ack interest"
-        );
-
-        let (recovery_manager, mut context, pending_ack_ranges) =
-            self.recovery(handshake_status, local_id_registry, path_id, path_manager);
-        recovery_manager.on_pending_ack_ranges(
-            timestamp,
-            pending_ack_ranges,
-            &mut context,
-            publisher,
-        )
     }
 }
 
@@ -741,20 +707,25 @@ impl<Config: endpoint::Config> PacketSpace<Config> for ApplicationSpace<Config> 
         timestamp: Timestamp,
         path_id: path::Id,
         path_manager: &mut path::Manager<Config>,
+        packet_number: PacketNumber,
         handshake_status: &mut HandshakeStatus,
         local_id_registry: &mut connection::LocalIdRegistry,
+        random_generator: &mut Config::RandomGenerator,
         publisher: &mut Pub,
     ) -> Result<(), transport::Error> {
         let path = &mut path_manager[path_id];
         path.on_peer_validated();
-        let (recovery_manager, mut context, _) =
+        let (recovery_manager, mut context) =
             self.recovery(handshake_status, local_id_registry, path_id, path_manager);
 
-        // TODO enable delayed ack processing. It might be possible to process
-        // the ACKs immediately if insertion into PendingAckRanges fails
-        //
-        // self.update_pending_acks(&frame, &mut self.pending_ack_ranges)
-        recovery_manager.on_ack_frame(timestamp, frame, &mut context, publisher)
+        recovery_manager.on_ack_frame(
+            timestamp,
+            frame,
+            packet_number,
+            random_generator,
+            &mut context,
+            publisher,
+        )
     }
 
     fn handle_connection_close_frame(
@@ -778,6 +749,15 @@ impl<Config: endpoint::Config> PacketSpace<Config> for ApplicationSpace<Config> 
         packet.bytes_progressed +=
             (self.stream_manager.incoming_bytes_progressed() - bytes_progressed).as_u64() as usize;
 
+        Ok(())
+    }
+
+    fn handle_datagram_frame(
+        &mut self,
+        path: s2n_quic_core::event::api::Path<'_>,
+        frame: DatagramRef,
+    ) -> Result<(), transport::Error> {
+        self.datagram_manager.on_datagram_frame(path, frame);
         Ok(())
     }
 
@@ -962,11 +942,18 @@ impl<Config: endpoint::Config> PacketSpace<Config> for ApplicationSpace<Config> 
         Ok(())
     }
 
-    fn on_processed_packet(
+    fn on_processed_packet<Pub: event::ConnectionPublisher>(
         &mut self,
         processed_packet: ProcessedPacket,
+        path_id: path::Id,
+        path: &Path<Config>,
+        publisher: &mut Pub,
     ) -> Result<(), transport::Error> {
-        self.ack_manager.on_processed_packet(&processed_packet);
+        self.ack_manager.on_processed_packet(
+            &processed_packet,
+            path_event!(path, path_id),
+            publisher,
+        );
         self.processed_packet_numbers
             .insert(processed_packet.packet_number)
             .expect("packet number was already checked");

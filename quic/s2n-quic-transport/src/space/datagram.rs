@@ -4,12 +4,17 @@
 use crate::{
     endpoint,
     stream::{AbstractStreamManager, StreamTrait as Stream},
-    transmission::{interest, WriteContext},
+    transmission::{
+        interest::{self, Provider},
+        WriteContext,
+    },
 };
+use core::task::Poll;
 use s2n_codec::EncoderValue;
 use s2n_quic_core::{
-    datagram::{Endpoint, Sender, WriteError},
-    frame,
+    datagram::{Endpoint, ReceiveContext, Receiver, Sender, WriteError},
+    frame::{self, datagram::DatagramRef},
+    query,
     varint::VarInt,
 };
 
@@ -18,18 +23,22 @@ use s2n_quic_core::{
 // Used to call datagram callbacks during packet transmission and
 // packet processing.
 pub struct Manager<Config: endpoint::Config> {
-    sender: <<Config as endpoint::Config>::DatagramEndpoint as Endpoint>::Sender,
-    // TODO: Remove this warning once Receiver is implemented
-    #[allow(dead_code)]
-    receiver: <<Config as endpoint::Config>::DatagramEndpoint as Endpoint>::Receiver,
+    pub sender: <<Config as endpoint::Config>::DatagramEndpoint as Endpoint>::Sender,
+    pub receiver: <<Config as endpoint::Config>::DatagramEndpoint as Endpoint>::Receiver,
+    max_datagram_payload: u64,
 }
 
 impl<Config: endpoint::Config> Manager<Config> {
     pub fn new(
         sender: <<Config as endpoint::Config>::DatagramEndpoint as Endpoint>::Sender,
         receiver: <<Config as endpoint::Config>::DatagramEndpoint as Endpoint>::Receiver,
+        max_datagram_payload: u64,
     ) -> Self {
-        Self { sender, receiver }
+        Self {
+            sender,
+            receiver,
+            max_datagram_payload,
+        }
     }
 
     /// A callback that allows users to write datagrams directly to the packet.
@@ -37,12 +46,42 @@ impl<Config: endpoint::Config> Manager<Config> {
         &mut self,
         context: &mut W,
         stream_manager: &mut AbstractStreamManager<S>,
+        datagrams_prioritized: bool,
     ) {
         let mut packet = Packet {
             context,
             has_pending_streams: stream_manager.has_pending_streams(),
+            datagrams_prioritized,
+            max_datagram_payload: self.max_datagram_payload,
         };
         self.sender.on_transmit(&mut packet);
+    }
+
+    // A callback that allows users to access datagrams directly after they are
+    // received.
+    pub fn on_datagram_frame(
+        &mut self,
+        path: s2n_quic_core::event::api::Path<'_>,
+        datagram: DatagramRef,
+    ) {
+        let context = ReceiveContext::new(path);
+        self.receiver.on_datagram(&context, datagram.data);
+    }
+
+    pub fn datagram_mut(&mut self, query: &mut dyn query::QueryMut) -> Poll<()> {
+        // Try to execute the query on the sender side. If that fails, try the receiver side.
+        match query.execute_mut(&mut self.sender) {
+            query::ControlFlow::Continue => {
+                query.execute_mut(&mut self.receiver);
+            }
+            query::ControlFlow::Break => (),
+        }
+
+        if self.has_transmission_interest() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -59,6 +98,8 @@ impl<Config: endpoint::Config> interest::Provider for Manager<Config> {
 struct Packet<'a, C: WriteContext> {
     context: &'a mut C,
     has_pending_streams: bool,
+    datagrams_prioritized: bool,
+    max_datagram_payload: u64,
 }
 
 impl<'a, C: WriteContext> s2n_quic_core::datagram::Packet for Packet<'a, C> {
@@ -77,6 +118,9 @@ impl<'a, C: WriteContext> s2n_quic_core::datagram::Packet for Packet<'a, C> {
 
     /// Writes a single datagram to a packet
     fn write_datagram(&mut self, data: &[u8]) -> Result<(), WriteError> {
+        if data.len() as u64 > self.max_datagram_payload {
+            return Err(WriteError::ExceedsPeerTransportLimits);
+        }
         let remaining_capacity = self.context.remaining_capacity();
         let data_len = data.len();
         let is_last_frame =
@@ -87,13 +131,18 @@ impl<'a, C: WriteContext> s2n_quic_core::datagram::Packet for Packet<'a, C> {
         };
         self.context
             .write_frame(&frame)
-            .ok_or(WriteError::DatagramIsTooLarge)?;
+            .ok_or(WriteError::ExceedsPacketCapacity)?;
 
         Ok(())
     }
 
-    // Returns whether or not there is reliable data ready to send
+    /// Returns whether or not there is reliable data ready to send
     fn has_pending_streams(&self) -> bool {
         self.has_pending_streams
+    }
+
+    /// Returns whether or not datagrams are prioritized in this packet or not
+    fn datagrams_prioritized(&self) -> bool {
+        self.datagrams_prioritized
     }
 }

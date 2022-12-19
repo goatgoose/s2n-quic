@@ -73,6 +73,12 @@ impl Trace for Usdt {
     }
 
     #[inline(never)]
+    fn profile(&mut self, now: Timestamp, id: u64, time: Duration) {
+        let time = time.as_micros() as u64;
+        probe!(netbench, netbench__profile, self.connection_id, id, time);
+    }
+
+    #[inline(never)]
     fn park(&mut self, _now: Timestamp, id: u64) {
         probe!(netbench, netbench__park, self.connection_id, id);
     }
@@ -84,12 +90,7 @@ impl Trace for Usdt {
 
     #[inline(never)]
     fn connect(&mut self, _now: Timestamp, id: u64, time: Duration) {
-        probe!(
-            netbench,
-            netbench__connect,
-            self.connection_id,
-            id,
-            time.as_nanos() as u64
-        );
+        let time = time.as_micros() as u64;
+        probe!(netbench, netbench__connect, self.connection_id, id, time);
     }
 }

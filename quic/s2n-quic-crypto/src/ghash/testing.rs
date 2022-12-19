@@ -26,21 +26,21 @@ pub trait GHash {
 
 lazy_static! {
     static ref IMPLEMENTATIONS: Vec<Implementation> = {
-        let mut impls = vec![];
+        let impls = vec![];
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        super::x86::testing::implementations(&mut impls);
+        let impls = super::x86::testing::implementations(impls);
 
-        #[cfg(any(test, feature = "ghash"))]
-        rust_crypto::implementations(&mut impls);
+        #[cfg(test)]
+        let impls = rust_crypto::implementations(impls);
 
         impls
     };
 }
 
 pub fn implementations() -> &'static [Implementation] {
-    &*IMPLEMENTATIONS
+    &IMPLEMENTATIONS
 }
 
-#[cfg(any(test, feature = "ghash"))]
+#[cfg(test)]
 mod rust_crypto;

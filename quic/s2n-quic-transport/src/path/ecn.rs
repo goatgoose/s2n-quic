@@ -32,7 +32,9 @@ const CE_SUPPRESSION_TESTING_RTT_MULTIPLIER: RangeInclusive<u16> = 10..=100;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValidationOutcome {
     /// The path is ECN capable and congestion was experienced
-    CongestionExperienced,
+    ///
+    /// Contains the incremental count of packets that experienced congestion
+    CongestionExperienced(VarInt),
     /// The path failed validation
     Failed,
     /// The path passed validation
@@ -95,11 +97,11 @@ impl Controller {
     }
 
     /// Called when the connection timer expires
-    pub fn on_timeout<Rnd: random::Generator, Pub: event::ConnectionPublisher>(
+    pub fn on_timeout<Pub: event::ConnectionPublisher>(
         &mut self,
         now: Timestamp,
         path: event::builder::Path,
-        random_generator: &mut Rnd,
+        random_generator: &mut dyn random::Generator,
         rtt: Duration,
         publisher: &mut Pub,
     ) {
@@ -130,7 +132,7 @@ impl Controller {
         }
 
         match self.state {
-            //= https://www.rfc-editor.org/rfc/rfc9000#section-A.4
+            //= https://www.rfc-editor.org/rfc/rfc9000#appendix-A.4
             //# On paths with a "testing" or "capable" state, the endpoint
             //# sends packets with an ECT marking -- ECT(0) by default;
             //# otherwise, the endpoint sends unmarked packets.
@@ -167,8 +169,8 @@ impl Controller {
     /// bias in the resulting count, but does not result in any reduction in security for this
     /// usage. Other usages that require uniform sampling should implement rejection sampling or
     /// other methodologies and not copy this implementation.
-    fn next_ce_packet_duration<Rnd: random::Generator>(
-        random_generator: &mut Rnd,
+    fn next_ce_packet_duration(
+        random_generator: &mut dyn random::Generator,
         rtt: Duration,
     ) -> Duration {
         let mut bytes = [0; core::mem::size_of::<u16>()];
@@ -234,9 +236,10 @@ impl Controller {
             }
         }
 
-        let congestion_experienced = if let Some(incremental_ecn_counts) = ack_frame_ecn_counts
-            .unwrap_or_default()
-            .checked_sub(baseline_ecn_counts)
+        let congestion_experienced_count = if let Some(incremental_ecn_counts) =
+            ack_frame_ecn_counts
+                .unwrap_or_default()
+                .checked_sub(baseline_ecn_counts)
         {
             if Self::ce_remarking(incremental_ecn_counts, newly_acked_ecn_counts)
                 || Self::remarked_to_ect0_or_ect1(incremental_ecn_counts, sent_packet_ecn_counts)
@@ -246,14 +249,15 @@ impl Controller {
                 return ValidationOutcome::Failed;
             }
 
-            incremental_ecn_counts.ce_count > newly_acked_ecn_counts.ce_count
+            // ce_suppression check above ensures this doesn't underflow
+            incremental_ecn_counts.ce_count - newly_acked_ecn_counts.ce_count
         } else {
             // ECN counts decreased from the baseline
             self.fail(now, path, publisher);
             return ValidationOutcome::Failed;
         };
 
-        //= https://www.rfc-editor.org/rfc/rfc9000#section-A.4
+        //= https://www.rfc-editor.org/rfc/rfc9000#appendix-A.4
         //# From the "unknown" state, successful validation of the ECN counts in an ACK frame
         //# (see Section 13.4.2.1) causes the ECN state for the path to become "capable",
         //# unless no marked packet has been acknowledged.
@@ -268,8 +272,8 @@ impl Controller {
             self.change_state(State::Capable(ce_suppression_timer), path, publisher);
         }
 
-        if self.is_capable() && congestion_experienced {
-            return ValidationOutcome::CongestionExperienced;
+        if self.is_capable() && congestion_experienced_count > VarInt::ZERO {
+            return ValidationOutcome::CongestionExperienced(congestion_experienced_count);
         }
 
         ValidationOutcome::Passed

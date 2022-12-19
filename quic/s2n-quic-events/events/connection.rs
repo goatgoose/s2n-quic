@@ -93,6 +93,7 @@ struct RecoveryMetrics<'a> {
     pto_count: u32,
     congestion_window: u32,
     bytes_in_flight: u32,
+    congestion_limited: bool,
 }
 
 #[event("recovery:congestion")]
@@ -100,6 +101,41 @@ struct RecoveryMetrics<'a> {
 struct Congestion<'a> {
     path: Path<'a>,
     source: CongestionSource,
+}
+
+#[event("recovery:ack_processed")]
+#[deprecated(note = "use on_rx_ack_range_dropped event instead")]
+/// Events related to ACK processing
+struct AckProcessed<'a> {
+    action: AckAction,
+    path: Path<'a>,
+}
+
+#[event("recovery:rx_ack_range_dropped")]
+/// Ack range for received packets was dropped due to space constraints
+///
+/// For the purpose of processing Acks, RX packet numbers are stored as
+/// packet_number ranges in an IntervalSet; only lower and upper bounds
+/// are stored instead of individual packet_numbers. Ranges are merged
+/// when possible so only disjointed ranges are stored.
+///
+/// When at `capacity`, the lowest packet_number range is dropped.
+struct RxAckRangeDropped<'a> {
+    path: Path<'a>,
+    /// The packet number range which was dropped
+    packet_number_range: core::ops::RangeInclusive<u64>,
+    /// The number of disjoint ranges the IntervalSet can store
+    capacity: usize,
+    /// The store packet_number range in the IntervalSet
+    stored_range: core::ops::RangeInclusive<u64>,
+}
+
+#[event("recovery:ack_range_received")]
+/// ACK range was received
+struct AckRangeReceived<'a> {
+    packet_header: PacketHeader,
+    path: Path<'a>,
+    ack_range: RangeInclusive<u64>,
 }
 
 #[event("transport:packet_dropped")]
@@ -236,4 +272,45 @@ struct TxStreamProgress {
 #[event("connectivity::keep_alive_timer_expired")]
 pub struct KeepAliveTimerExpired {
     timeout: Duration,
+}
+
+#[event("connectivity:mtu_updated")]
+/// The maximum transmission unit (MTU) for the path has changed
+struct MtuUpdated {
+    path_id: u64,
+    mtu: u16,
+    cause: MtuUpdatedCause,
+}
+
+#[event("recovery:slow_start_exited")]
+/// The slow start congestion controller state has been exited
+struct SlowStartExited {
+    path_id: u64,
+    cause: SlowStartExitCause,
+    congestion_window: u32,
+}
+
+#[event("recovery:delivery_rate_sampled")]
+/// A new delivery rate sample has been generated
+/// Note: This event is only recorded for congestion controllers that support
+///       bandwidth estimates, such as BBR
+struct DeliveryRateSampled {
+    path_id: u64,
+    rate_sample: RateSample,
+}
+
+#[event("recovery:pacing_rate_updated")]
+/// The pacing rate has been updated
+struct PacingRateUpdated {
+    path_id: u64,
+    bytes_per_second: u64,
+    burst_size: u32,
+    pacing_gain: f32,
+}
+
+#[event("recovery:bbr_state_changed")]
+/// The BBR state has changed
+struct BbrStateChanged {
+    path_id: u64,
+    state: BbrState,
 }

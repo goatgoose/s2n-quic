@@ -1,10 +1,11 @@
 [package]
 name = "s2n-quic-core"
-version = "0.2.1"
+version = "0.15.0"
 description = "Internal crate used by s2n-quic"
 repository = "https://github.com/aws/s2n-quic"
 authors = ["AWS s2n"]
-edition = "2018"
+edition = "2021"
+rust-version = "1.57"
 license = "Apache-2.0"
 # Exclude corpus files when publishing to crates.io
 exclude = ["corpus.tar.gz"]
@@ -12,63 +13,34 @@ exclude = ["corpus.tar.gz"]
 [features]
 default = ["alloc", "std"]
 alloc = []
-std = ["alloc"]
+std = ["alloc", "once_cell"]
 testing = ["std", "generator", "s2n-codec/testing", "checked-counters", "insta", "futures-test"]
 generator = ["bolero-generator"]
 checked-counters = []
 event-tracing = ["tracing"]
 
 [dependencies]
-bolero-generator = { version = "0.6", default-features = false, optional = true }
+bolero-generator = { version = "0.8", default-features = false, optional = true }
 byteorder = { version = "1", default-features = false }
 bytes = { version = "1", default-features = false }
 hex-literal = "0.3"
 # used for event snapshot testing - needs an internal API so we require a minimum version
-insta = { version = ">=1.12", optional = true }
+insta = { version = ">=1.12", features = ["json"], optional = true }
 num-rational = { version = "0.4", default-features = false }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
-s2n-codec = { version = "=0.1.0", path = "../../common/s2n-codec", default-features = false }
+s2n-codec = { version = "=0.2.0", path = "../../common/s2n-codec", default-features = false }
 subtle = { version = "2", default-features = false }
 tracing = { version = "0.1", default-features = false, optional = true }
 zerocopy = "=0.6.0"
 zerocopy-derive = "=0.3.0"
 futures-test = { version = "0.3", optional = true } # For testing Waker interactions
+once_cell = { version = "1", optional = true }
 
 [dev-dependencies]
-bolero = "0.6"
-bolero-generator = { version = "0.6", default-features = false }
-insta = "1"
+bolero = "0.8"
+bolero-generator = { version = "0.8", default-features = false }
+insta = { version = "1", features = ["json"] }
 futures-test = "0.3"
 ip_network = "0.4"
 plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series"] }
 s2n-codec = { path = "../../common/s2n-codec", features = ["testing"] }
-
-[[test]]
-name = "crypto"
-path = "tests/crypto/fuzz_target.rs"
-harness = false
-
-[[test]]
-name = "frame"
-path = "tests/frame/fuzz_target.rs"
-harness = false
-
-[[test]]
-name = "packet"
-path = "tests/packet/fuzz_target.rs"
-harness = false
-required-features = ["testing"]
-
-[[test]]
-name = "transport_parameters"
-path = "tests/transport_parameters/fuzz_target.rs"
-harness = false
-
-[[test]]
-name = "varint"
-path = "tests/varint/fuzz_target.rs"
-harness = false
-
-[[test]]
-name = "recovery-simulation"
-path = "tests/recovery/simulation.rs"

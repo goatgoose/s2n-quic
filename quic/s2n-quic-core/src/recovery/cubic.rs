@@ -3,8 +3,10 @@
 
 use crate::{
     counter::Counter,
+    event::builder::SlowStartExitCause,
+    random,
     recovery::{
-        congestion_controller::{self, CongestionController},
+        congestion_controller::{self, CongestionController, Publisher},
         cubic::{FastRetransmission::*, State::*},
         hybrid_slow_start::HybridSlowStart,
         pacing::Pacer,
@@ -72,6 +74,11 @@ impl State {
 
             timing.app_limited_time = Some(timestamp);
         }
+    }
+
+    /// Returns true if the state is `SlowStart`
+    fn is_slow_start(&self) -> bool {
+        matches!(self, SlowStart)
     }
 }
 
@@ -145,7 +152,7 @@ pub struct CubicCongestionController {
     max_datagram_size: u16,
     congestion_window: f32,
     state: State,
-    //= https://www.rfc-editor.org/rfc/rfc9002#section-B.2
+    //= https://www.rfc-editor.org/rfc/rfc9002#appendix-B.2
     //# The sum of the size in bytes of all sent packets
     //# that contain at least one ack-eliciting or PADDING frame and have
     //# not been acknowledged or declared lost.  The size does not include
@@ -154,9 +161,15 @@ pub struct CubicCongestionController {
     //# Packets only containing ACK frames do not count toward
     //# bytes_in_flight to ensure congestion control does not impede
     //# congestion feedback.
+
+    // ACK + PADDING packets do not contribute to bytes_in_flight
+    // See https://github.com/aws/s2n-quic/pull/1514
     bytes_in_flight: BytesInFlight,
     time_of_last_sent_packet: Option<Timestamp>,
     under_utilized: bool,
+    // The highest number of bytes in flight seen when an ACK was received,
+    // since the last congestion event.
+    bytes_in_flight_hi: BytesInFlight,
 }
 
 type BytesInFlight = Counter<u32>;
@@ -188,11 +201,13 @@ impl CongestionController for CubicCongestionController {
     }
 
     #[inline]
-    fn on_packet_sent(
+    fn on_packet_sent<Pub: Publisher>(
         &mut self,
         time_sent: Timestamp,
         bytes_sent: usize,
+        app_limited: Option<bool>,
         rtt_estimator: &RttEstimator,
+        publisher: &mut Pub,
     ) {
         if bytes_sent == 0 {
             // Packet was not congestion controlled
@@ -203,7 +218,18 @@ impl CongestionController for CubicCongestionController {
             .try_add(bytes_sent)
             .expect("bytes sent should not exceed u32::MAX");
 
-        self.under_utilized = self.is_congestion_window_under_utilized();
+        if let Some(app_limited) = app_limited {
+            // We check both the given `app_limited` value and is_congestion_window_under_utilized()
+            // as is_congestion_window_under_utilized() is more lenient with respect to the utilization
+            // of the congestion window than the app_limited check. is_congestion_window_under_utilized()
+            // returns true if there are more than 3 MTU's of space left in the cwnd, or less than
+            // half the cwnd is utilized in slow start.
+            self.under_utilized = app_limited && self.is_congestion_window_under_utilized();
+        } else {
+            // We don't externally determine `app_limited` in the Initial and Handshake packet
+            // spaces, so set under_utilized based on is_congestion_window_under_utilized alone
+            self.under_utilized = self.is_congestion_window_under_utilized();
+        }
 
         if let Recovery(recovery_start_time, RequiresTransmission) = self.state {
             // A packet has been sent since we entered recovery (fast retransmission)
@@ -213,20 +239,25 @@ impl CongestionController for CubicCongestionController {
 
         self.time_of_last_sent_packet = Some(time_sent);
 
-        let slow_start = matches!(self.state, State::SlowStart);
-
         self.pacer.on_packet_sent(
             time_sent,
             bytes_sent,
             rtt_estimator,
             self.congestion_window(),
             self.max_datagram_size,
-            slow_start,
+            self.state.is_slow_start(),
+            publisher,
         );
     }
 
     #[inline]
-    fn on_rtt_update(&mut self, time_sent: Timestamp, rtt_estimator: &RttEstimator) {
+    fn on_rtt_update<Pub: Publisher>(
+        &mut self,
+        time_sent: Timestamp,
+        now: Timestamp,
+        rtt_estimator: &RttEstimator,
+        publisher: &mut Pub,
+    ) {
         // Update the Slow Start algorithm each time the RTT
         // estimate is updated to find the slow start threshold.
         self.slow_start.on_rtt_update(
@@ -236,17 +267,34 @@ impl CongestionController for CubicCongestionController {
                 .expect("At least one packet must be sent to update RTT"),
             rtt_estimator.latest_rtt(),
         );
+
+        if self.state.is_slow_start() && self.congestion_window >= self.slow_start.threshold {
+            publisher.on_slow_start_exited(SlowStartExitCause::Rtt, self.congestion_window());
+            //= https://www.rfc-editor.org/rfc/rfc8312#section-4.8
+            //# In the case when CUBIC runs the hybrid slow start [HR08], it may exit
+            //# the first slow start without incurring any packet loss and thus W_max
+            //# is undefined.  In this special case, CUBIC switches to congestion
+            //# avoidance and increases its congestion window size using Eq. 1, where
+            //# t is the elapsed time since the beginning of the current congestion
+            //# avoidance, K is set to 0, and W_max is set to the congestion window
+            //# size at the beginning of the current congestion avoidance.
+            self.state = State::congestion_avoidance(now);
+            self.cubic.on_slow_start_exit(self.congestion_window);
+        }
     }
 
     #[inline]
-    fn on_ack(
+    fn on_ack<Pub: Publisher>(
         &mut self,
         newest_acked_time_sent: Timestamp,
         bytes_acknowledged: usize,
         _newest_acked_packet_info: Self::PacketInfo,
         rtt_estimator: &RttEstimator,
+        _random_generator: &mut dyn random::Generator,
         ack_receive_time: Timestamp,
+        publisher: &mut Pub,
     ) {
+        self.bytes_in_flight_hi = self.bytes_in_flight_hi.max(self.bytes_in_flight);
         self.bytes_in_flight
             .try_sub(bytes_acknowledged)
             .expect("bytes_acknowledged should not exceed u32::MAX");
@@ -273,6 +321,25 @@ impl CongestionController for CubicCongestionController {
             }
         };
 
+        // The congestion window may continue to grow while app-limited due to pacing
+        // interrupting sending while momentarily not app-limited. To avoid the congestion
+        // window growing too far beyond bytes in flight, we limit the maximum cwnd to
+        // the highest bytes_in_flight value seen since the last congestion event multiplied
+        // by a multiplier depending on the current state.
+        const SLOW_START_MAX_CWND_MULTIPLIER: f32 = 2.0;
+        const MAX_CWND_MULTIPLIER: f32 = 1.5;
+        let max_cwnd = match self.state {
+            SlowStart => *self.bytes_in_flight_hi as f32 * SLOW_START_MAX_CWND_MULTIPLIER,
+            Recovery(_, _) => self.congestion_window,
+            CongestionAvoidance(_) => *self.bytes_in_flight_hi as f32 * MAX_CWND_MULTIPLIER,
+        }
+        .max(self.cubic.minimum_window());
+
+        if self.congestion_window >= max_cwnd {
+            // The window is already larger than the max, so we can return early
+            return;
+        }
+
         match self.state {
             SlowStart => {
                 //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.1
@@ -280,17 +347,15 @@ impl CongestionController for CubicCongestionController {
                 //# the number of bytes acknowledged when each acknowledgment is
                 //# processed.  This results in exponential growth of the congestion
                 //# window.
-                self.congestion_window += bytes_acknowledged as f32;
+                self.congestion_window = (self.congestion_window
+                    + self.slow_start.cwnd_increment(bytes_acknowledged))
+                .min(max_cwnd);
 
                 if self.congestion_window >= self.slow_start.threshold {
-                    //= https://www.rfc-editor.org/rfc/rfc8312#section-4.8
-                    //# In the case when CUBIC runs the hybrid slow start [HR08], it may exit
-                    //# the first slow start without incurring any packet loss and thus W_max
-                    //# is undefined.  In this special case, CUBIC switches to congestion
-                    //# avoidance and increases its congestion window size using Eq. 1, where
-                    //# t is the elapsed time since the beginning of the current congestion
-                    //# avoidance, K is set to 0, and W_max is set to the congestion window
-                    //# size at the beginning of the current congestion avoidance.
+                    // The congestion window has exceeded a previously determined slow start threshold
+                    // so transition to congestion avoidance and notify cubic of the slow start exit
+                    publisher
+                        .on_slow_start_exited(SlowStartExitCause::Other, self.congestion_window());
                     self.state = State::congestion_avoidance(ack_receive_time);
                     self.cubic.on_slow_start_exit(self.congestion_window);
                 }
@@ -314,7 +379,7 @@ impl CongestionController for CubicCongestionController {
                 //      investigation and testing to evaluate if smoothed_rtt would be a better input.
                 let rtt = rtt_estimator.min_rtt();
 
-                self.congestion_avoidance(t, rtt, bytes_acknowledged);
+                self.congestion_avoidance(t, rtt, bytes_acknowledged, max_cwnd);
             }
         };
 
@@ -322,17 +387,25 @@ impl CongestionController for CubicCongestionController {
     }
 
     #[inline]
-    fn on_packet_lost(
+    fn on_packet_lost<Pub: Publisher>(
         &mut self,
         lost_bytes: u32,
         _packet_info: Self::PacketInfo,
         persistent_congestion: bool,
         _new_loss_burst: bool,
+        _random_generator: &mut dyn random::Generator,
         timestamp: Timestamp,
+        publisher: &mut Pub,
     ) {
         debug_assert!(lost_bytes > 0);
 
         self.bytes_in_flight -= lost_bytes;
+
+        if self.state.is_slow_start() && !persistent_congestion {
+            publisher
+                .on_slow_start_exited(SlowStartExitCause::PacketLoss, self.congestion_window());
+        }
+
         self.on_congestion_event(timestamp);
 
         //= https://www.rfc-editor.org/rfc/rfc9002#section-7.6.2
@@ -348,50 +421,27 @@ impl CongestionController for CubicCongestionController {
     }
 
     #[inline]
-    fn on_congestion_event(&mut self, event_time: Timestamp) {
-        // No reaction if already in a recovery period.
-        if matches!(self.state, Recovery(_, _)) {
-            return;
+    fn on_explicit_congestion<Pub: Publisher>(
+        &mut self,
+        _ce_count: u64,
+        event_time: Timestamp,
+        publisher: &mut Pub,
+    ) {
+        if self.state.is_slow_start() {
+            publisher.on_slow_start_exited(SlowStartExitCause::Ecn, self.congestion_window());
         }
 
-        // Enter recovery period.
-
-        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.1
-        //# The sender MUST exit slow start and enter a recovery period when a
-        //# packet is lost or when the ECN-CE count reported by its peer
-        //# increases.
-
-        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.2
-        //# If the congestion window is reduced immediately, a
-        //# single packet can be sent prior to reduction.  This speeds up loss
-        //# recovery if the data in the lost packet is retransmitted and is
-        //# similar to TCP as described in Section 5 of [RFC6675].
-        self.state = Recovery(event_time, RequiresTransmission);
-
-        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.2
-        //# Implementations MAY reduce the congestion window immediately upon
-        //# entering a recovery period or use other mechanisms, such as
-        //# Proportional Rate Reduction [PRR], to reduce the congestion window
-        //# more gradually.
-
-        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.2
-        //# The minimum congestion window is the smallest value the congestion
-        //# window can attain in response to loss, an increase in the peer-
-        //# reported ECN-CE count, or persistent congestion.
-        self.congestion_window = self.cubic.multiplicative_decrease(self.congestion_window);
-
-        // Update Hybrid Slow Start with the decreased congestion window.
-        self.slow_start.on_congestion_event(self.congestion_window);
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.1
+        //# If a path has been validated to support Explicit Congestion
+        //# Notification (ECN) [RFC3168] [RFC8311], QUIC treats a Congestion
+        //# Experienced (CE) codepoint in the IP header as a signal of
+        //# congestion.
+        self.on_congestion_event(event_time);
     }
 
-    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.2
-    //# If the maximum datagram size changes during the connection, the
-    //# initial congestion window SHOULD be recalculated with the new size.
-    //# If the maximum datagram size is decreased in order to complete the
-    //# handshake, the congestion window SHOULD be set to the new initial
-    //# congestion window.
-
     //= https://www.rfc-editor.org/rfc/rfc8899#section-3
+    //= type=exception
+    //= reason=See https://github.com/aws/s2n-quic/issues/959
     //# An update to the PLPMTU (or MPS) MUST NOT increase the congestion
     //# window measured in bytes [RFC4821].
 
@@ -399,19 +449,21 @@ impl CongestionController for CubicCongestionController {
     //# A PL that maintains the congestion window in terms of a limit to
     //# the number of outstanding fixed-size packets SHOULD adapt this
     //# limit to compensate for the size of the actual packets.
+
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.2
+    //= type=exception
+    //= reason=The maximum datagram size remains at the minimum (1200 bytes) during the handshake
+    //# If the maximum datagram size is decreased in order to complete the
+    //# handshake, the congestion window SHOULD be set to the new initial
+    //# congestion window.
     #[inline]
-    fn on_mtu_update(&mut self, max_datagram_size: u16) {
+    fn on_mtu_update<Pub: Publisher>(&mut self, max_datagram_size: u16, _publisher: &mut Pub) {
         let old_max_datagram_size = self.max_datagram_size;
         self.max_datagram_size = max_datagram_size;
         self.cubic.max_datagram_size = max_datagram_size;
 
-        if max_datagram_size < old_max_datagram_size {
-            self.congestion_window =
-                CubicCongestionController::initial_window(max_datagram_size) as f32;
-        } else {
-            self.congestion_window =
-                (self.congestion_window / old_max_datagram_size as f32) * max_datagram_size as f32;
-        }
+        self.congestion_window =
+            (self.congestion_window / old_max_datagram_size as f32) * max_datagram_size as f32;
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9002#section-6.4
@@ -422,7 +474,7 @@ impl CongestionController for CubicCongestionController {
     //# associated with those packets and MUST remove them from the count of
     //# bytes in flight.
     #[inline]
-    fn on_packet_discarded(&mut self, bytes_sent: usize) {
+    fn on_packet_discarded<Pub: Publisher>(&mut self, bytes_sent: usize, _publisher: &mut Pub) {
         self.bytes_in_flight
             .try_sub(bytes_sent)
             .expect("bytes sent should not exceed u32::MAX");
@@ -453,6 +505,7 @@ impl CubicCongestionController {
             bytes_in_flight: Counter::new(0),
             time_of_last_sent_packet: None,
             under_utilized: true,
+            bytes_in_flight_hi: Counter::new(0),
         }
     }
 
@@ -461,6 +514,10 @@ impl CubicCongestionController {
     //# window of ten times the maximum datagram size (max_datagram_size),
     //# while limiting the window to the larger of 14,720 bytes or twice the
     //# maximum datagram size.
+
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.2
+    //# If the maximum datagram size changes during the connection, the
+    //# initial congestion window SHOULD be recalculated with the new size.
     #[inline]
     fn initial_window(max_datagram_size: u16) -> u32 {
         const INITIAL_WINDOW_LIMIT: u32 = 14720;
@@ -471,12 +528,18 @@ impl CubicCongestionController {
     }
 
     #[inline]
-    fn congestion_avoidance(&mut self, t: Duration, rtt: Duration, sent_bytes: usize) {
+    fn congestion_avoidance(
+        &mut self,
+        t: Duration,
+        rtt: Duration,
+        sent_bytes: usize,
+        max_cwnd: f32,
+    ) {
         let w_cubic = self.cubic.w_cubic(t);
         let w_est = self.cubic.w_est(t, rtt);
         // limit the window increase to half the acked bytes
         // as the Linux implementation of Cubic does.
-        let max_cwnd = self.congestion_window + sent_bytes as f32 / 2.0;
+        let max_cwnd = (self.congestion_window + sent_bytes as f32 / 2.0).min(max_cwnd);
 
         if w_cubic < w_est {
             // TCP-Friendly Region
@@ -540,6 +603,46 @@ impl CubicCongestionController {
     }
 
     #[inline]
+    fn on_congestion_event(&mut self, event_time: Timestamp) {
+        // Reset bytes_in_flight_hi
+        self.bytes_in_flight_hi = BytesInFlight::new(0);
+
+        // No reaction if already in a recovery period.
+        if matches!(self.state, Recovery(_, _)) {
+            return;
+        }
+
+        // Enter recovery period.
+
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.1
+        //# The sender MUST exit slow start and enter a recovery period when a
+        //# packet is lost or when the ECN-CE count reported by its peer
+        //# increases.
+
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.2
+        //# If the congestion window is reduced immediately, a
+        //# single packet can be sent prior to reduction.  This speeds up loss
+        //# recovery if the data in the lost packet is retransmitted and is
+        //# similar to TCP as described in Section 5 of [RFC6675].
+        self.state = Recovery(event_time, RequiresTransmission);
+
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.2
+        //# Implementations MAY reduce the congestion window immediately upon
+        //# entering a recovery period or use other mechanisms, such as
+        //# Proportional Rate Reduction [PRR], to reduce the congestion window
+        //# more gradually.
+
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.2
+        //# The minimum congestion window is the smallest value the congestion
+        //# window can attain in response to loss, an increase in the peer-
+        //# reported ECN-CE count, or persistent congestion.
+        self.congestion_window = self.cubic.multiplicative_decrease(self.congestion_window);
+
+        // Update Hybrid Slow Start with the decreased congestion window.
+        self.slow_start.on_congestion_event(self.congestion_window);
+    }
+
+    #[inline]
     fn packets_to_bytes(&self, cwnd: f32) -> f32 {
         cwnd * self.max_datagram_size as f32
     }
@@ -558,7 +661,7 @@ impl CubicCongestionController {
 
         // In slow start, allow the congestion window to increase as long as half of it is
         // being used. This allows for the window to increase rapidly.
-        if matches!(self.state, SlowStart) && self.bytes_in_flight >= self.congestion_window() / 2 {
+        if self.state.is_slow_start() && self.bytes_in_flight >= self.congestion_window() / 2 {
             return false;
         }
 
@@ -757,6 +860,7 @@ impl Cubic {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Default)]
 pub struct Endpoint {}
 

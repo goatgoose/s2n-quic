@@ -4,7 +4,7 @@
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct Id(String);
 
 impl Id {
@@ -28,7 +28,7 @@ impl Hasher {
     pub fn finish(self) -> Id {
         use sha2::Digest;
         let hash = self.hash.finalize();
-        let out = base64::encode_config(&hash, base64::URL_SAFE_NO_PAD);
+        let out = base64::encode_config(hash, base64::URL_SAFE_NO_PAD);
         // '_' is not allowed in DNS names
         let out = out.replace('_', "-");
         Id(out)

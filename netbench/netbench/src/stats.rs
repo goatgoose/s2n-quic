@@ -25,6 +25,8 @@ pub struct Initialize {
     pub driver: String,
     pub scenario: String,
     pub start_time: SystemTime,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub traces: Vec<String>,
 }
 
 impl Default for Initialize {
@@ -34,6 +36,7 @@ impl Default for Initialize {
             driver: Default::default(),
             scenario: Default::default(),
             start_time: std::time::SystemTime::now(),
+            traces: vec![],
         }
     }
 }
@@ -59,15 +62,23 @@ pub struct Stats {
     #[serde(default, skip_serializing_if = "is_default")]
     pub syscalls: u64,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub connections: u64,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub accept: u64,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub allocs: Stat,
     #[serde(default, skip_serializing_if = "is_default")]
     pub reallocs: Stat,
     #[serde(default, skip_serializing_if = "is_default")]
     pub deallocs: Stat,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub connect_time: Stat,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub send: HashMap<StreamId, Stat>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub receive: HashMap<StreamId, Stat>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub profiles: HashMap<u64, Histogram>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +87,27 @@ pub struct Stat {
     pub count: u64,
     #[serde(default, skip_serializing_if = "is_default")]
     pub total: u64,
+}
+
+impl Stat {
+    pub fn average(&self) -> f64 {
+        self.total as f64 / self.count as f64
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Histogram {
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub stat: Stat,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub buckets: Vec<Bucket>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bucket {
+    pub lower: u64,
+    pub upper: u64,
+    pub count: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]

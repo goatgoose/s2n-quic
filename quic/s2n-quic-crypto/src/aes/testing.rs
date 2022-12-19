@@ -27,13 +27,13 @@ macro_rules! aes_impl {
 
             lazy_static! {
                 static ref IMPLEMENTATIONS: Vec<Implementation> = {
-                    let mut impls = vec![];
+                    let impls = vec![];
 
                     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-                    crate::aes::x86::testing::$name::implementations(&mut impls);
+                    let impls = crate::aes::x86::testing::$name::implementations(impls);
 
-                    #[cfg(any(test, feature = "aes"))]
-                    super::rust_crypto::$name::implementations(&mut impls);
+                    #[cfg(test)]
+                    let impls = super::rust_crypto::$name::implementations(impls);
 
                     impls
                 };
@@ -58,13 +58,11 @@ pub trait Aes {
 
 #[inline(always)]
 pub fn for_each_block<F: FnMut(&mut [u8; BLOCK_LEN])>(input: &mut [u8], mut f: F) {
-    use core::convert::TryInto;
-
     for chunk in input.chunks_exact_mut(BLOCK_LEN) {
         let block: &mut [u8; BLOCK_LEN] = chunk.try_into().unwrap();
         f(block)
     }
 }
 
-#[cfg(any(test, feature = "aes"))]
+#[cfg(test)]
 mod rust_crypto;

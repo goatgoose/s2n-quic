@@ -62,6 +62,9 @@ pub mod map;
 #[cfg(feature = "alloc")]
 pub use map::Map;
 
+#[cfg(test)]
+mod tests;
+
 //= https://www.rfc-editor.org/rfc/rfc9000#section-17.1
 //# the sender MUST use a packet number size able to represent more than
 //# twice as large a range as the difference between the largest
@@ -92,7 +95,7 @@ fn derive_truncation_range(
 //# bit more than the base-2 logarithm of the number of contiguous
 //# unacknowledged packet numbers, including the new packet.
 
-//= https://www.rfc-editor.org/rfc/rfc9000#section-A.2
+//= https://www.rfc-editor.org/rfc/rfc9000#appendix-A.2
 //# For example, if an endpoint has received an acknowledgment for packet
 //# 0xabe8b3 and is sending a packet with a number of 0xac5c02, there are
 //# 29,519 (0x734f) outstanding packet numbers.  In order to represent at
@@ -156,7 +159,7 @@ fn packet_decoding_example_test() {
     );
 }
 
-//= https://www.rfc-editor.org/rfc/rfc9000#section-A.3
+//= https://www.rfc-editor.org/rfc/rfc9000#appendix-A.3
 //# DecodePacketNumber(largest_pn, truncated_pn, pn_nbits):
 //#   expected_pn  = largest_pn + 1
 //#   pn_win       = 1 << pn_nbits
@@ -182,12 +185,11 @@ fn packet_decoding_example_test() {
 //#     return candidate_pn - pn_win
 //#   return candidate_pn
 
+#[inline(never)] // prevent the compiler from optimizing call size values and making this non-constant time
 fn decode_packet_number(
     largest_pn: PacketNumber,
     truncated_pn: TruncatedPacketNumber,
 ) -> PacketNumber {
-    use crate::ct::{ConditionallySelectable, Number};
-
     let space = largest_pn.space();
     space.assert_eq(truncated_pn.space());
 
@@ -197,171 +199,38 @@ fn decode_packet_number(
     let pn_win = 1 << pn_nbits;
     let pn_hwin = pn_win / 2;
     let pn_mask = pn_win - 1;
-    let candidate_pn = (expected_pn & !pn_mask) | truncated_pn.into_u64();
+    let mut candidate_pn = (expected_pn & !pn_mask) | truncated_pn.into_u64();
 
-    // convert numbers into checked Number
-    let expected_pn = Number::new(expected_pn);
-    let mut candidate_pn = Number::new(candidate_pn);
+    let a = expected_pn
+        .checked_sub(pn_hwin)
+        .filter(|v| candidate_pn <= *v)
+        .is_some();
+    let b = (1u64 << 62)
+        .checked_sub(pn_win)
+        .filter(|v| candidate_pn < *v)
+        .is_some();
+    let c = expected_pn
+        .checked_add(pn_hwin)
+        .filter(|v| candidate_pn > *v)
+        .is_some();
+    let d = candidate_pn >= pn_win;
 
-    let a_value = candidate_pn + pn_win;
-    let a_choice = candidate_pn.ct_le(expected_pn - pn_hwin)
-        & a_value.ct_le(Number::new(VarInt::MAX.as_u64()));
+    let ab = a && b;
+    let cd = !ab && c && d;
 
-    let b_value = candidate_pn - pn_win;
-    let b_choice = candidate_pn.ct_gt(expected_pn + pn_hwin) & b_value.is_valid();
+    // Make sure the compiler doesn't try and optimize the if statements
+    // See https://godbolt.org/z/348WbbbzM
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
-    // apply the choices in reverse since it's easier to emulate the early returns
-    // with the `conditional_assign` calls
-    candidate_pn.conditional_assign(&b_value, b_choice);
-    candidate_pn.conditional_assign(&a_value, a_choice);
+    if ab {
+        candidate_pn += pn_win;
+    }
 
-    let candidate_pn = candidate_pn.unwrap_or_default().min(VarInt::MAX.as_u64());
+    if cd {
+        candidate_pn -= pn_win
+    }
 
-    let candidate_pn = unsafe {
-        // Safety: the value has already been checked in constant time above
-        debug_assert!(candidate_pn <= VarInt::MAX.as_u64());
-        VarInt::new_unchecked(candidate_pn)
-    };
+    let candidate_pn = VarInt::new(candidate_pn).unwrap_or(VarInt::MAX);
 
     PacketNumber::from_varint(candidate_pn, space)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bolero::check;
-
-    fn new(value: VarInt) -> PacketNumber {
-        PacketNumberSpace::Initial.new_packet_number(value)
-    }
-
-    /// This implementation tries to closely follow the RFC pseudo code so it's
-    /// easier to ensure it matches.
-    #[allow(clippy::blocks_in_if_conditions)]
-    fn rfc_decoder(largest_pn: u64, truncated_pn: u64, pn_nbits: usize) -> u64 {
-        use std::panic::catch_unwind as catch;
-
-        //= https://www.rfc-editor.org/rfc/rfc9000#section-A.3
-        //= type=test
-        //# DecodePacketNumber(largest_pn, truncated_pn, pn_nbits):
-        //#   expected_pn  = largest_pn + 1
-        //#   pn_win       = 1 << pn_nbits
-        //#   pn_hwin      = pn_win / 2
-        //#   pn_mask      = pn_win - 1
-        //#   // The incoming packet number should be greater than
-        //#   // expected_pn - pn_hwin and less than or equal to
-        //#   // expected_pn + pn_hwin
-        //#   //
-        //#   // This means we cannot just strip the trailing bits from
-        //#   // expected_pn and add the truncated_pn because that might
-        //#   // yield a value outside the window.
-        //#   //
-        //#   // The following code calculates a candidate value and
-        //#   // makes sure it's within the packet number window.
-        //#   // Note the extra checks to prevent overflow and underflow.
-        //#   candidate_pn = (expected_pn & ~pn_mask) | truncated_pn
-        //#   if candidate_pn <= expected_pn - pn_hwin and
-        //#     candidate_pn < (1 << 62) - pn_win:
-        //#     return candidate_pn + pn_win
-        //#   if candidate_pn > expected_pn + pn_hwin and
-        //#     candidate_pn >= pn_win:
-        //#     return candidate_pn - pn_win
-        //#   return candidate_pn
-        let expected_pn = largest_pn + 1;
-        let pn_win = 1 << pn_nbits;
-        let pn_hwin = pn_win / 2;
-        let pn_mask = pn_win - 1;
-
-        let candidate_pn = (expected_pn & !pn_mask) | truncated_pn;
-        if catch(|| {
-            candidate_pn <= expected_pn.checked_sub(pn_hwin).unwrap()
-                && candidate_pn < (1u64 << 62).checked_sub(pn_win).unwrap()
-        })
-        .unwrap_or_default()
-        {
-            return candidate_pn + pn_win;
-        }
-
-        if catch(|| {
-            candidate_pn > expected_pn.checked_add(pn_hwin).unwrap() && candidate_pn >= pn_win
-        })
-        .unwrap_or_default()
-        {
-            return candidate_pn - pn_win;
-        }
-
-        candidate_pn
-    }
-
-    #[test]
-    fn truncate_expand_test() {
-        check!()
-            .with_type()
-            .cloned()
-            .for_each(|(largest_pn, expected_pn)| {
-                let largest_pn = new(largest_pn);
-                let expected_pn = new(expected_pn);
-                if let Some(truncated_pn) = expected_pn.truncate(largest_pn) {
-                    assert_eq!(expected_pn, truncated_pn.expand(largest_pn));
-                }
-            });
-    }
-
-    #[test]
-    fn rfc_differential_test() {
-        check!()
-            .with_type()
-            .cloned()
-            .for_each(|(largest_pn, truncated_pn)| {
-                let largest_pn = new(largest_pn);
-                let space = largest_pn.space();
-                let truncated_pn = TruncatedPacketNumber {
-                    space,
-                    value: truncated_pn,
-                };
-                let rfc_value = rfc_decoder(
-                    largest_pn.as_u64(),
-                    truncated_pn.into_u64(),
-                    truncated_pn.bitsize(),
-                )
-                .min(VarInt::MAX.as_u64());
-                let actual_value = truncated_pn.expand(largest_pn).as_u64();
-
-                assert_eq!(
-                    actual_value,
-                    rfc_value,
-                    "diff: {}",
-                    actual_value
-                        .checked_sub(rfc_value)
-                        .unwrap_or(rfc_value - actual_value)
-                );
-            });
-    }
-
-    #[test]
-    fn example_test() {
-        macro_rules! example {
-            ($largest:expr, $truncated:expr, $expected:expr) => {{
-                let largest = new(VarInt::from_u32($largest));
-                let truncated = TruncatedPacketNumber::new($truncated, PacketNumberSpace::Initial);
-                let expected = new(VarInt::from_u32($expected));
-                assert_eq!(truncated.expand(largest), expected);
-            }};
-        }
-
-        example!(0xa82e1b31, 0x9b32u16, 0xa82e9b32);
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore)] // snapshot tests don't work on miri
-    fn size_of_snapshots() {
-        use core::mem::size_of;
-        use insta::assert_debug_snapshot;
-
-        assert_debug_snapshot!("PacketNumber", size_of::<PacketNumber>());
-        assert_debug_snapshot!("PacketNumberLen", size_of::<PacketNumberLen>());
-        assert_debug_snapshot!("PacketNumberSpace", size_of::<PacketNumberSpace>());
-        assert_debug_snapshot!("ProtectedPacketNumber", size_of::<ProtectedPacketNumber>());
-        assert_debug_snapshot!("TruncatedPacketNumber", size_of::<TruncatedPacketNumber>());
-    }
 }

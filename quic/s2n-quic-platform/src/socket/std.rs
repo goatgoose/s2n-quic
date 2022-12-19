@@ -37,7 +37,7 @@ impl Socket for std::net::UdpSocket {
     fn send_to(&self, buf: &[u8], addr: &SocketAddress) -> Result<usize, Self::Error> {
         debug_assert!(!buf.is_empty());
         let addr: std::net::SocketAddr = (*addr).into();
-        self.send_to(buf, &addr)
+        self.send_to(buf, addr)
     }
 }
 
@@ -173,8 +173,8 @@ impl<B: Buffer> Queue<B> {
         Ok(count)
     }
 
-    pub fn rx_queue(&mut self) -> queue::OccupiedWipe<Message> {
-        self.0.occupied_wipe_mut()
+    pub fn rx_queue(&mut self) -> queue::Occupied<Message> {
+        self.0.occupied_mut()
     }
 
     pub fn tx_queue(&mut self) -> queue::Free<Message> {

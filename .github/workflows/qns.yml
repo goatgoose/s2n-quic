@@ -15,15 +15,15 @@ env:
   RUST_BACKTRACE: 1
   # This kept breaking builds so we're pinning for now. We should do our best to keep
   # up with the changes, though.
-  INTEROP_RUNNER_REF: add48d0229f2c7a0093abd76c3b2b6c36ff47def
+  INTEROP_RUNNER_REF: bdb2c815b8cfd70de4c2efb1bd278b1e87018ff8
   # This should be updated when updating wesleyrosenblum/quic-network-simulator
   NETWORK_SIMULATOR_REF: sha256:20abe0bed8c0e39e1d8750507b24295f7c978bdd7e05fa6f3a5afed4b76dc191
   IPERF_ENDPOINT_REF: sha256:cb50cc8019d45d9cad5faecbe46a3c21dd5e871949819a5175423755a9045106
-  WIRESHARK_VERSION: 3.6.2
+  WIRESHARK_VERSION: 3.6.6
   CDN: https://dnglbrstg7yg.cloudfront.net
   LOG_URL: logs/latest/SERVER_CLIENT/TEST/index.html
   H3_SPEC_VERSION: v0.1.8
-  QUINN_REF: d8615d9c2bae9cca78471f8875a15911fd1f443b
+  QUINN_REF: 6e4bcbb2fcb57ced2ef261c9662521c5baf37f3c
   # enable unstable features for testing
   S2N_UNSTABLE_CRYPTO_OPT_TX: 100
   S2N_UNSTABLE_CRYPTO_OPT_RX: 100
@@ -72,7 +72,7 @@ jobs:
         mode: ["debug", "release"]
     # enable debug information
     env:
-      RUSTFLAGS: "-g"
+      RUSTFLAGS: "-g --cfg s2n_internal_dev --cfg s2n_quic_dump_on_panic"
     steps:
       - uses: actions/checkout@v3
         with:
@@ -127,7 +127,7 @@ jobs:
 
       - name: Cache quinn
         id: cache
-        uses: actions/cache@v3.0.2
+        uses: actions/cache@v3.0.3
         continue-on-error: true
         with:
           path: |
@@ -155,7 +155,7 @@ jobs:
     steps:
       - name: Cache
         id: cache
-        uses: actions/cache@v3.0.2
+        uses: actions/cache@v3.0.3
         continue-on-error: true
         with:
           path: tshark
@@ -235,7 +235,7 @@ jobs:
           docker pull "wesleyrosenblum/quic-network-simulator@$NETWORK_SIMULATOR_REF"
           docker pull "martenseemann/quic-interop-iperf-endpoint@$IPERF_ENDPOINT_REF"
 
-      - uses: actions/setup-python@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: 3.7
 
@@ -295,7 +295,7 @@ jobs:
                 $from
           done
 
-      - uses: aws-actions/configure-aws-credentials@v1.6.1
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -387,7 +387,7 @@ jobs:
             results/**/result.json > \
               web/logs/latest/result.json
 
-      - uses: aws-actions/configure-aws-credentials@v1.6.1
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -405,7 +405,7 @@ jobs:
           URL="$CDN/$TARGET/index.html"
           echo "::set-output name=URL::$URL"
 
-      - uses: ouzi-dev/commit-status-updater@v1.1.2
+      - uses: ouzi-dev/commit-status-updater@v2.0.1
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           name: "interop / report"
@@ -454,7 +454,7 @@ jobs:
       # authenticate pull to avoid hitting pull quota
       - name: Login to Amazon Elastic Container Registry Public
         if: github.repository == github.event.pull_request.head.repo.full_name
-        uses: docker/login-action@v1
+        uses: docker/login-action@v2.1.0
         with:
           registry: public.ecr.aws
           username: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -493,7 +493,7 @@ jobs:
         if: github.event_name == 'push'
         run: sudo env "PATH=$PATH" "BUILD_S2N_QUIC=false" ./scripts/benchmark/run-all
 
-      - uses: aws-actions/configure-aws-credentials@v1.6.1
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -509,7 +509,7 @@ jobs:
           URL="$CDN/$TARGET/index.html"
           echo "::set-output name=URL::$URL"
 
-      - uses: ouzi-dev/commit-status-updater@v1.1.2
+      - uses: ouzi-dev/commit-status-updater@v2.0.1
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           name: "bench / report"
@@ -583,9 +583,10 @@ jobs:
     needs: [quinn, s2n-quic-qns]
     strategy:
       matrix:
-        tls: ["s2n-tls", "rustls"]
         include:
           - client: "quinn"
+            server: "s2n-quic"
+          - client: "s2n-quic"
             server: "s2n-quic"
 
     steps:
@@ -637,11 +638,11 @@ jobs:
         run: |
           set -e
           mkdir -p target/perf/results
-          sudo env "PATH=$PATH" "SHELL=$SHELL" ./scripts/perf/test 1000 0 ${{ matrix.server }} ${{ matrix.client }} ${{ matrix.tls }}
-          sudo env "PATH=$PATH" "SHELL=$SHELL" ./scripts/perf/test 750 250 ${{ matrix.server }} ${{ matrix.client }} ${{ matrix.tls }}
-          sudo env "PATH=$PATH" "SHELL=$SHELL" ./scripts/perf/test 500 500 ${{ matrix.server }} ${{ matrix.client }} ${{ matrix.tls }}
-          sudo env "PATH=$PATH" "SHELL=$SHELL" ./scripts/perf/test 250 750 ${{ matrix.server }} ${{ matrix.client }} ${{ matrix.tls }}
-          sudo env "PATH=$PATH" "SHELL=$SHELL" ./scripts/perf/test 0 1000 ${{ matrix.server }} ${{ matrix.client }} ${{ matrix.tls }}
+          sudo env "PATH=$PATH" "SHELL=$SHELL" ./scripts/perf/test 1000 0 ${{ matrix.server }} ${{ matrix.client }}
+          sudo env "PATH=$PATH" "SHELL=$SHELL" ./scripts/perf/test 750 250 ${{ matrix.server }} ${{ matrix.client }}
+          sudo env "PATH=$PATH" "SHELL=$SHELL" ./scripts/perf/test 500 500 ${{ matrix.server }} ${{ matrix.client }}
+          sudo env "PATH=$PATH" "SHELL=$SHELL" ./scripts/perf/test 250 750 ${{ matrix.server }} ${{ matrix.client }}
+          sudo env "PATH=$PATH" "SHELL=$SHELL" ./scripts/perf/test 0 1000 ${{ matrix.server }} ${{ matrix.client }}
           sudo chown -R $(whoami) target/perf/results
 
       - name: Prepare artifacts
@@ -652,7 +653,7 @@ jobs:
 
       - uses: actions/upload-artifact@v3
         with:
-          name: perf-${{ matrix.tls }}
+          name: perf-results-${{ matrix.server }}-${{ matrix.client }}
           path: target/perf/results
 
   perf-report:
@@ -661,22 +662,22 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      # add any additional perf tests here
       - uses: actions/download-artifact@v3
         with:
-          name: perf-rustls
-          path: ./perf-results/rustls
-
+          name: perf-results-s2n-quic-quinn
+          path: perf-results/
       - uses: actions/download-artifact@v3
         with:
-          name: perf-s2n-tls
-          path: ./perf-results/s2n-tls
+          name: perf-results-s2n-quic-s2n-quic
+          path: perf-results/
 
       - name: Generate report
         run: |
           cd perf-results
           tree -H "." -T "Performance Results" --noreport --charset utf-8 > index.html
 
-      - uses: aws-actions/configure-aws-credentials@v1.6.1
+      - uses: aws-actions/configure-aws-credentials@v1.7.0
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -692,7 +693,7 @@ jobs:
           URL="$CDN/$TARGET/index.html"
           echo "::set-output name=URL::$URL"
 
-      - uses: ouzi-dev/commit-status-updater@v1.1.2
+      - uses: ouzi-dev/commit-status-updater@v2.0.1
         if: github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name
         with:
           name: "perf / report"

@@ -5,6 +5,7 @@ use crate::{
     recovery::{
         bandwidth::Bandwidth,
         bbr::{
+            ecn::ECN_FACTOR,
             windowed_filter::{MinRttWindowedFilter, WindowedMaxFilter},
             BETA,
         },
@@ -28,7 +29,7 @@ pub(crate) struct Model {
     extra_acked_filter: WindowedMaxFilter<u64, u64, u64>,
     //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#2.12
     //# the start of the time interval for estimating the excess amount of data acknowledged due to aggregation effects.
-    extra_acked_interval_start: Timestamp,
+    extra_acked_interval_start: Option<Timestamp>,
     //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#2.12
     //# the volume of data marked as delivered since BBR.extra_acked_interval_start.
     extra_acked_delivered: u64,
@@ -44,10 +45,9 @@ pub(crate) struct Model {
     inflight_lo: u64,
 }
 
-#[allow(dead_code)] // TODO: Remove when used
 impl Model {
     /// Constructs a new `data_volume::Model`
-    pub fn new(now: Timestamp) -> Self {
+    pub fn new() -> Self {
         //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#2.12
         //# The window length of the BBR.ExtraACKedFilter max filter window:
         //# 10 (in units of packet-timed round trips).
@@ -56,7 +56,7 @@ impl Model {
         Self {
             min_rtt_filter: MinRttWindowedFilter::new(),
             extra_acked_filter: WindowedMaxFilter::new(EXTRA_ACKED_FILTER_LEN),
-            extra_acked_interval_start: now,
+            extra_acked_interval_start: None,
             extra_acked_delivered: 0,
             inflight_hi: u64::MAX,
             inflight_lo: u64::MAX,
@@ -71,27 +71,6 @@ impl Model {
     /// The windowed minimum round trip time
     pub fn min_rtt(&self) -> Option<Duration> {
         self.min_rtt_filter.min_rtt()
-    }
-
-    /// The estimate of the volume of in-flight data required to fully utilize the bottleneck
-    /// bandwidth available to the flow, based on the BDP estimate (BBR.bdp), the aggregation
-    /// estimate (BBR.extra_acked), the offload budget (BBR.offload_budget), and BBRMinPipeCwnd.
-    pub fn max_inflight(
-        &self,
-        bdp: u64,
-        offload_budget: u64,
-        min_pipe_cwnd: u32,
-        probebw_up: bool,
-        max_datagram_size: u16,
-    ) -> u64 {
-        let inflight = bdp + self.extra_acked();
-        self.quantization_budget(
-            inflight,
-            offload_budget,
-            min_pipe_cwnd,
-            probebw_up,
-            max_datagram_size,
-        )
     }
 
     /// The long-term maximum volume of in-flight data that the algorithm
@@ -133,69 +112,123 @@ impl Model {
         round_count: u64,
         now: Timestamp,
     ) {
-        // Find excess ACKed beyond expected amount over this interval
-        let interval = now - self.extra_acked_interval_start;
-        let mut expected_delivered = bw * interval;
+        //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.5.5
+        //# BBRUpdateACKAggregation():
+        //#   /* Find excess ACKed beyond expected amount over this interval */
+        //#   interval = (Now() - BBR.extra_acked_interval_start)
+        //#   expected_delivered = BBR.bw * interval
+        //#   /* Reset interval if ACK rate is below expected rate: */
+        //#   if (BBR.extra_acked_delivered <= expected_delivered)
+        //#       BBR.extra_acked_delivered = 0
+        //#       BBR.extra_acked_interval_start = Now()
+        //#       expected_delivered = 0
+        //#   BBR.extra_acked_delivered += rs.newly_acked
+        //#   extra = BBR.extra_acked_delivered - expected_delivered
+        //#   extra = min(extra, cwnd)
+        //#   BBR.extra_acked =
+        //#     update_windowed_max_filter(
+        //#       filter=BBR.ExtraACKedFilter,
+        //#       value=extra,
+        //#       time=BBR.round_count,
+        //#       window_length=BBRExtraAckedFilterLen)
+
+        let mut expected_delivered = 0;
+
+        if let Some(extra_acked_interval_start) = self.extra_acked_interval_start {
+            // Find excess ACKed beyond expected amount over this interval
+            let interval = now - extra_acked_interval_start;
+            expected_delivered = bw * interval;
+        }
+
         // Reset interval if ACK rate is below expected rate
-        if self.extra_acked_delivered <= expected_delivered {
+        if self.extra_acked_delivered <= expected_delivered
+            || self.extra_acked_interval_start.is_none()
+        {
             self.extra_acked_delivered = 0;
-            self.extra_acked_interval_start = now;
+            self.extra_acked_interval_start = Some(now);
             expected_delivered = 0;
         }
+
         self.extra_acked_delivered += bytes_acknowledged as u64;
         let extra = (self.extra_acked_delivered - expected_delivered).min(cwnd as u64);
         self.extra_acked_filter.update(extra, round_count);
     }
 
-    /// Updates `inflight_hi` with the given `inflight_hi` if it exceeds the current `inflight_hi`
+    /// Updates `inflight_hi` with the given `inflight_hi`
     pub fn update_upper_bound(&mut self, inflight_hi: u64) {
-        if self.inflight_hi == u64::MAX {
-            self.inflight_hi = inflight_hi;
-        } else {
-            self.inflight_hi = inflight_hi.max(self.inflight_hi);
-        }
+        self.inflight_hi = inflight_hi;
     }
 
-    /// Updates `inflight_lo` with the given `inflight_latest` if it exceeds
-    /// the current `inflight_lo` * `bbr::BETA`
-    pub fn update_lower_bound(&mut self, cwnd: u32, inflight_latest: u64) {
+    /// Updates `inflight_lo` if there is loss or ECN in the round
+    pub fn update_lower_bound(
+        &mut self,
+        cwnd: u32,
+        inflight_latest: u64,
+        loss_in_round: bool,
+        ecn_in_round: bool,
+        ecn_alpha: f64,
+    ) {
+        if !loss_in_round && !ecn_in_round {
+            return;
+        }
+
+        //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.5.6.3
+        //# if (BBR.inflight_lo == Infinity)
+        //#     BBR.inflight_lo = cwnd
         if self.inflight_lo == u64::MAX {
             self.inflight_lo = cwnd as u64;
         }
 
-        self.inflight_lo = inflight_latest.max((BETA * self.inflight_lo).to_integer());
+        // Update inflight_lo to the lower of the values determined when loss_in_round or ecn_in_round
+        // Based on https://github.com/google/bbr/blob/1a45fd4faf30229a3d3116de7bfe9d2f933d3562/net/ipv4/tcp_bbr2.c#L1618
+        let ecn_inflight_lo = if ecn_in_round {
+            ((1.0 - (ecn_alpha * ECN_FACTOR)) * self.inflight_lo as f64) as u64
+        } else {
+            u64::MAX
+        };
+
+        let loss_inflight_lo = if loss_in_round {
+            //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.5.6.3
+            //# BBR.inflight_lo = max(BBR.inflight_latest,
+            //#                       BBRBeta * BBR.infligh_lo)
+            inflight_latest.max((BETA * self.inflight_lo).to_integer())
+        } else {
+            u64::MAX
+        };
+
+        self.inflight_lo = loss_inflight_lo.min(ecn_inflight_lo);
     }
 
     /// Resets `inflight_lo` to its initial value
     pub fn reset_lower_bound(&mut self) {
+        //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.5.6.3
+        //# BBR.inflight_lo = Infinity
         self.inflight_lo = u64::MAX
     }
 
-    /// Calculates the quantization budget
-    pub fn quantization_budget(
-        &self,
-        inflight: u64,
-        offload_budget: u64,
-        min_pipe_cwnd: u32,
-        probebw_up: bool,
-        max_datagram_size: u16,
-    ) -> u64 {
-        //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.6.4.2
-        //# BBRQuantizationBudget(inflight)
-        //#   BBRUpdateOffloadBudget()
-        //#   inflight = max(inflight, BBR.offload_budget)
-        //#   inflight = max(inflight, BBRMinPipeCwnd)
-        //#   if (BBR.state == ProbeBW && BBR.cycle_idx == ProbeBW_UP)
-        //#     inflight += 2
-        //#   return inflight
+    /// Sets the `extra_acked_interval_start` to the given `timestamp`
+    pub fn set_extra_acked_interval_start(&mut self, timestamp: Timestamp) {
+        self.extra_acked_interval_start = Some(timestamp);
+    }
 
-        let mut inflight = inflight.max(offload_budget).max(min_pipe_cwnd as u64);
+    #[cfg(test)]
+    pub fn set_extra_acked_for_test(&mut self, sample: u64, round_count: u64) {
+        self.extra_acked_filter.update(sample, round_count);
+    }
 
-        if probebw_up {
-            inflight += 2 * max_datagram_size as u64;
-        }
+    #[cfg(test)]
+    pub fn set_inflight_lo_for_test(&mut self, inflight_lo: u64) {
+        self.inflight_lo = inflight_lo;
+    }
 
-        inflight
+    #[cfg(test)]
+    pub fn extra_acked_interval_start(&self) -> Option<Timestamp> {
+        self.extra_acked_interval_start
+    }
+
+    #[cfg(test)]
+    pub fn next_probe_rtt(&self) -> Option<Timestamp> {
+        self.min_rtt_filter.next_probe_rtt()
     }
 }
 
@@ -206,8 +239,7 @@ mod tests {
 
     #[test]
     fn new() {
-        let now = NoopClock.get_time();
-        let model = Model::new(now);
+        let model = Model::new();
 
         assert_eq!(0, model.extra_acked());
         assert_eq!(None, model.min_rtt());
@@ -218,7 +250,7 @@ mod tests {
     #[test]
     fn update_ack_aggregation() {
         let now = NoopClock.get_time();
-        let mut model = Model::new(now);
+        let mut model = Model::new();
 
         let now = now + Duration::from_millis(200);
         let bw = Bandwidth::new(1500, Duration::from_secs(1));
@@ -227,7 +259,7 @@ mod tests {
         model.update_ack_aggregation(bw, 1600, 12000, 0, now);
 
         assert_eq!(1600, model.extra_acked());
-        assert_eq!(now, model.extra_acked_interval_start);
+        assert_eq!(Some(now), model.extra_acked_interval_start);
         assert_eq!(1600, model.extra_acked_delivered);
 
         let now = now + Duration::from_secs(1);
@@ -248,55 +280,40 @@ mod tests {
     }
 
     #[test]
-    fn update_upper_bound() {
-        let now = NoopClock.get_time();
-        let mut model = Model::new(now);
-
-        let inflight_hi = 100;
-
-        model.update_upper_bound(inflight_hi);
-
-        // We didn't have a valid inflight_hi value yet, so the first sample is used
-        assert_eq!(inflight_hi, model.inflight_hi());
-
-        model.update_upper_bound(50);
-
-        // The new sample is lower than inflight_hi, so don't update inflight_hi
-        assert_eq!(inflight_hi, model.inflight_hi());
-
-        let inflight_hi = 150;
-        model.update_upper_bound(inflight_hi);
-
-        // The new sample is higher than inflight_hi, so update inflight_hi
-        assert_eq!(inflight_hi, model.inflight_hi());
-    }
-
-    #[test]
     fn update_lower_bound() {
-        let now = NoopClock.get_time();
-        let mut model = Model::new(now);
+        let mut model = Model::new();
 
-        model.update_lower_bound(1000, 100);
+        model.update_lower_bound(1000, 100, true, false, 1.0);
 
         // We didn't have a valid inflight_lo value yet, and the given inflight_latest is lower than cwnd * BETA,
         // so inflight_lo is set to cwnd * BETA
         assert_eq!((BETA * 1000).to_integer(), model.inflight_lo());
 
-        model.update_upper_bound(50);
-
-        // The new sample is lower than inflight_lo, so don't update inflight_lo
-        assert_eq!((BETA * 1000).to_integer(), model.inflight_lo());
-
-        let inflight_lo = 1500;
-        model.update_lower_bound(1000, inflight_lo);
+        let inflight_latest = 1500;
+        model.update_lower_bound(1000, inflight_latest, true, false, 1.0);
 
         // The new sample is higher than inflight_lo, so update inflight_lo
-        assert_eq!(inflight_lo, model.inflight_lo());
+        assert_eq!(inflight_latest, model.inflight_lo());
+
+        let ecn_alpha = 4.0 / 5.0;
+        model.update_lower_bound(1000, inflight_latest, false, true, ecn_alpha);
+
+        // There was ecn_in_round, so lower inflight_lo according to ecn_alpha
+        // (1 - 4/5 * .33) * 1500 = 1104
+        assert_eq!(1104, model.inflight_lo());
 
         // Resetting the lower bound sets inflight_lo to u64::MAX
         model.reset_lower_bound();
         assert_eq!(u64::MAX, model.inflight_lo());
-    }
 
-    // TODO: add tests for max_inflight and quantization_budget
+        // There is both ECN and Loss in the round, but the Loss reduced value is lower, so use the Loss value
+        model.update_lower_bound(1500, 100, true, true, ecn_alpha);
+        assert_eq!(1050, model.inflight_lo());
+
+        model.reset_lower_bound();
+
+        // There is both ECN and Loss in the round, but the Loss reduced value is higher, so use the ECN value
+        model.update_lower_bound(1500, 1200, true, true, ecn_alpha);
+        assert_eq!(1104, model.inflight_lo());
+    }
 }
