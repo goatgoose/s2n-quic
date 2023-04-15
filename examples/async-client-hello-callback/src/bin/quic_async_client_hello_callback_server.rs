@@ -14,6 +14,14 @@ use s2n_quic::{
     },
     Server,
 };
+use s2n_quic::provider::tls::default::s2n_tls::callbacks::{
+    PrivateKeyCallback,
+    PrivateKeyOperation
+};
+use s2n_quic_tls::certificate;
+use std::task::{Context, Poll};
+use openssl::{ec::EcKey, ecdsa::EcdsaSig};
+use pin_project::pin_project;
 use std::{error::Error, fmt::Display, pin::Pin, sync::Arc, time::Duration};
 use tokio::{fs, sync::OnceCell};
 
@@ -90,23 +98,21 @@ impl ClientHelloCallback for ConfigCache {
                 eprintln!("resolving certificate for SNI: {}", sni);
 
                 // load the cert and key file asynchronously.
-                let (cert, key) = {
+                let cert = {
                     // the SNI can be used to load the appropriate cert file
                     let _sni = sni;
                     let cert = fs::read_to_string(CERT_PEM_PATH)
                         .await
                         .map_err(|_| S2nError::application(Box::new(CustomError)))?;
-                    let key = fs::read_to_string(KEY_PEM_PATH)
-                        .await
-                        .map_err(|_| S2nError::application(Box::new(CustomError)))?;
-                    (cert, key)
+                    cert
                 };
 
                 // sleep(async tokio task which doesn't block thread) to mimic delay
                 tokio::time::sleep(Duration::from_secs(3)).await;
 
                 let config = s2n_quic::provider::tls::s2n_tls::Server::builder()
-                    .with_certificate(cert, key)?
+                    .with_certificate(cert, certificate::OFFLOAD_PRIVATE_KEY)?
+                    .with_private_key_handler(PrivateKeyCallbackHandler {})?
                     .build()?
                     .into();
                 Ok(config)
@@ -117,6 +123,51 @@ impl ClientHelloCallback for ConfigCache {
         // return `Some(ConnectionFuture)` if the Config wasn't found in the
         // cache and we need to load it asynchronously
         Ok(Some(Box::pin(ConfigResolver::new(fut))))
+    }
+}
+
+struct PrivateKeyCallbackHandler {}
+
+impl PrivateKeyCallback for PrivateKeyCallbackHandler {
+    fn handle_operation(
+        &self,
+        _connection: &mut Connection,
+        operation: PrivateKeyOperation
+    ) -> Result<Option<Pin<Box<dyn ConnectionFuture>>>, S2nError> {
+        let pkey_future = PrivateKeyFuture {
+            op: Some(operation)
+        };
+        Ok(Some(Box::pin(pkey_future)))
+    }
+}
+
+#[pin_project]
+struct PrivateKeyFuture {
+    #[pin]
+    op: Option<PrivateKeyOperation>
+}
+
+impl ConnectionFuture for PrivateKeyFuture {
+    fn poll(
+        self: Pin<&mut Self>,
+        connection: &mut Connection,
+        _ctx: &mut Context
+    ) -> Poll<Result<(), S2nError>> {
+        let mut this = self.project();
+
+        let op = this.op.take().expect("Missing pkey operation");
+        let in_buf_size = op.input_size()?;
+        let mut in_buf = vec![0; in_buf_size];
+        op.input(&mut in_buf)?;
+
+        let key = std::fs::read(KEY_PEM_PATH).unwrap();
+        let key = EcKey::private_key_from_pem(key.as_slice())
+            .expect("Failed to create EcKey from pem");
+        let sig = EcdsaSig::sign(&in_buf, &key).expect("Failed to sign input");
+        let out = sig.to_der().expect("Failed to convert signature to der");
+
+        op.set_output(connection, &out)?;
+        Poll::Ready(Ok(()))
     }
 }
 
