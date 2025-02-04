@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Setup - s2n-quic Guide</title>
+        <title>Debugging - s2n-quic Guide</title>
 
 
         <!-- Custom HTML head -->
@@ -129,7 +129,7 @@
                         <a href="https://github.com/aws/s2n-quic" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/aws/s2n-quic/edit/main/docs/./dev-guide/setup.md" title="Suggest an edit" aria-label="Suggest an edit">
+                        <a href="https://github.com/aws/s2n-quic/edit/main/docs/./user-guide/debugging.md" title="Suggest an edit" aria-label="Suggest an edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -158,28 +158,18 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="setup"><a class="header" href="#setup">Setup</a></h1>
-<h3 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h3>
-<ul>
-<li>GCC / clang (some CC). Installation of these items depends on your package manager.</li>
-<li>Install <a href="https://rustup.rs/">rustup</a></li>
-</ul>
-<pre><code class="language-sh"># Install components to test and analyze code
-rustup component add rustfmt clippy rust-analysis
-
-# Install the nightly toolchain for testing
-rustup toolchain install nightly
-</code></pre>
+                        <h1 id="debugging-s2n-quic"><a class="header" href="#debugging-s2n-quic">Debugging s2n-quic</a></h1>
+<p>Before <a href="https://github.com/aws/s2n-quic/issues/new?template=s2n-quic-issue.md">opening an issue</a> regarding <code>s2n-quic</code>, you may be able to solve the issue on your own (or at least collect useful debugging information) by performing the actions contained within this section. Attaching the <a href="debugging-tracelog.html">trace log</a> and <a href="debugging-pcap.html">packet capture</a> from these actions to the issue increases our ability to address your issue in a timely manner.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../dev-guide.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../user-guide/installation.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../dev-guide/ci.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../user-guide/debugging-tracelog.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -189,11 +179,11 @@ rustup toolchain install nightly
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../dev-guide.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../user-guide/installation.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../dev-guide/ci.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../user-guide/debugging-tracelog.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>
