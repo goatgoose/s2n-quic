@@ -21,7 +21,6 @@ impl Meta for api::EndpointMeta {
 
 mod generated;
 pub use generated::*;
-pub use s2n_quic_core::time::Duration;
 
 pub mod metrics {
     pub use crate::event::generated::metrics::*;

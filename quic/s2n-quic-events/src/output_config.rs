@@ -7,6 +7,7 @@ use quote::quote;
 #[derive(Debug, Default)]
 pub struct OutputConfig {
     pub mode: OutputMode,
+    pub target: OutputTarget,
 }
 
 #[derive(Debug, Default)]
@@ -14,6 +15,13 @@ pub enum OutputMode {
     Ref,
     #[default]
     Mut,
+}
+
+#[derive(Debug, Default)]
+pub enum OutputTarget {
+    #[default]
+    S2nQuic,
+    S2nTls,
 }
 
 impl OutputConfig {
@@ -141,10 +149,17 @@ impl OutputConfig {
         }
     }
 
+    fn supervisor_supported(&self) -> bool {
+        if matches!(self.mode, OutputMode::Mut) && matches!(self.target, OutputTarget::S2nQuic) {
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn supervisor(&self) -> TokenStream {
-        match self.mode {
-            OutputMode::Ref => quote!(),
-            OutputMode::Mut => quote!(
+        if self.supervisor_supported() {
+            return quote!(
                 pub mod supervisor {
                     //! This module contains the `supervisor::Outcome` and `supervisor::Context` for use
                     //! when implementing [`Subscriber::supervisor_timeout`](crate::event::Subscriber::supervisor_timeout) and
@@ -207,14 +222,15 @@ impl OutputConfig {
                         }
                     }
                 }
-            ),
+            )
         }
+
+        quote!()
     }
 
     pub fn supervisor_timeout(&self) -> TokenStream {
-        match self.mode {
-            OutputMode::Ref => quote!(),
-            OutputMode::Mut => quote!(
+        if self.supervisor_supported() {
+            return quote!(
                 /// The period at which `on_supervisor_timeout` is called
                 ///
                 /// If multiple `event::Subscriber`s are composed together, the minimum `supervisor_timeout`
@@ -250,14 +266,15 @@ impl OutputConfig {
                 ) -> supervisor::Outcome {
                     supervisor::Outcome::default()
                 }
-            ),
+            )
         }
+
+        quote!()
     }
 
     pub fn supervisor_timeout_tuple(&self) -> TokenStream {
-        match self.mode {
-            OutputMode::Ref => quote!(),
-            OutputMode::Mut => quote!(
+        if self.supervisor_supported() {
+            return quote!(
                 #[inline]
                 fn supervisor_timeout(
                     &mut self,
@@ -303,8 +320,10 @@ impl OutputConfig {
                         _ => supervisor::Outcome::Continue,
                     }
                 }
-            ),
+            )
         }
+
+        quote!()
     }
 
     pub fn ref_subscriber(&self, inner: TokenStream) -> TokenStream {

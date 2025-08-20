@@ -14,6 +14,7 @@ mod validation;
 
 use output::Output;
 use output_config::{OutputConfig, OutputMode};
+use crate::output_config::OutputTarget;
 
 struct EventInfo<'a> {
     input_path: &'a str,
@@ -68,9 +69,7 @@ impl EventInfo<'_> {
                 "/../s2n-quic-core/events/**/*.rs"
             ),
             output_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../s2n-quic-core/src/event"),
-            output_config: OutputConfig {
-                mode: OutputMode::Mut,
-            },
+            output_config: OutputConfig::default(),
             s2n_quic_core_path: quote!(crate),
             api: quote!(),
             builder: quote!(),
@@ -119,6 +118,7 @@ impl EventInfo<'_> {
             ),
             output_config: OutputConfig {
                 mode: OutputMode::Ref,
+                ..Default::default()
             },
             s2n_quic_core_path: quote!(s2n_quic_core),
             api: quote! {
@@ -172,12 +172,11 @@ impl EventInfo<'_> {
             output_path: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/tls/event"),
             output_config: OutputConfig {
                 mode: OutputMode::Mut,
+                target: OutputTarget::S2nTls,
             },
             s2n_quic_core_path: quote!(s2n_quic_core),
             api: quote!(),
-            builder: quote! {
-                pub use s2n_quic_core::event::builder::SocketAddress;
-            },
+            builder: quote!(),
             tracing_subscriber_attr: quote!(),
             tracing_subscriber_def,
             feature_alloc: quote!(),

@@ -3,7 +3,6 @@
 
 mod tls;
 
-pub use s2n_quic_core::{application, inet};
 pub use tls::event;
 
 use s2n_quic_core::{
