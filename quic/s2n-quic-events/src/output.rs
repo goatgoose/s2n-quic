@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{parser::File, OutputMode};
+use crate::{output_config::OutputConfig, parser::File};
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 use std::path::{Path, PathBuf};
@@ -31,7 +31,7 @@ pub struct Output {
     pub endpoint_publisher_testing: TokenStream,
     pub connection_publisher_testing: TokenStream,
     pub extra: TokenStream,
-    pub mode: OutputMode,
+    pub config: OutputConfig,
     pub crate_name: &'static str,
     pub s2n_quic_core_path: TokenStream,
     pub top_level: TokenStream,
@@ -110,7 +110,7 @@ impl ToTokens for Output {
             endpoint_publisher_testing,
             connection_publisher_testing,
             extra,
-            mode,
+            config: _,
             s2n_quic_core_path,
             top_level,
             feature_alloc: _,
@@ -118,23 +118,24 @@ impl ToTokens for Output {
             root: _,
         } = self;
 
-        let imports = self.mode.imports();
-        let mutex = self.mode.mutex();
-        let testing_output_type = self.mode.testing_output_type();
-        let lock = self.mode.lock();
-        let supervisor = self.mode.supervisor();
-        let supervisor_timeout = self.mode.supervisor_timeout();
-        let supervisor_timeout_tuple = self.mode.supervisor_timeout_tuple();
-        let query_mut = self.mode.query_mut();
-        let query_mut_tuple = self.mode.query_mut_tuple();
-        let trait_constraints = self.mode.trait_constraints();
+        let receiver = self.config.receiver();
+        let imports = self.config.imports();
+        let mutex = self.config.mutex();
+        let testing_output_type = self.config.testing_output_type();
+        let lock = self.config.lock();
+        let supervisor = self.config.supervisor();
+        let supervisor_timeout = self.config.supervisor_timeout();
+        let supervisor_timeout_tuple = self.config.supervisor_timeout_tuple();
+        let query_mut = self.config.query_mut();
+        let query_mut_tuple = self.config.query_mut_tuple();
+        let trait_constraints = self.config.trait_constraints();
 
-        let ref_subscriber = self.mode.ref_subscriber(quote!(
+        let ref_subscriber = self.config.ref_subscriber(quote!(
             type ConnectionContext = T::ConnectionContext;
 
             #[inline]
             fn create_connection_context(
-                &#mode self,
+                &#receiver self,
                 meta: &api::ConnectionMeta,
                 info: &api::ConnectionInfo
             ) -> Self::ConnectionContext {
@@ -144,14 +145,14 @@ impl ToTokens for Output {
             #ref_subscriber
 
             #[inline]
-            fn on_event<M: Meta, E: Event>(&#mode self, meta: &M, event: &E) {
+            fn on_event<M: Meta, E: Event>(&#receiver self, meta: &M, event: &E) {
                 self.as_ref().on_event(meta, event);
             }
 
             #[inline]
             fn on_connection_event<E: Event>(
-                &#mode self,
-                context: &#mode Self::ConnectionContext,
+                &#receiver self,
+                context: &#receiver Self::ConnectionContext,
                 meta: &api::ConnectionMeta,
                 event: &E
             ) {
@@ -192,7 +193,7 @@ impl ToTokens for Output {
                     type ConnectionContext = tracing::Span;
 
                     fn create_connection_context(
-                        &#mode self,
+                        &#receiver self,
                         meta: &api::ConnectionMeta,
                         _info: &api::ConnectionInfo
                     ) -> Self::ConnectionContext {
@@ -268,7 +269,7 @@ impl ToTokens for Output {
 
                     /// Creates a context to be passed to each connection-related event
                     fn create_connection_context(
-                        &#mode self,
+                        &#receiver self,
                         meta: &api::ConnectionMeta,
                         info: &api::ConnectionInfo
                     ) -> Self::ConnectionContext;
@@ -279,7 +280,7 @@ impl ToTokens for Output {
 
                     /// Called for each event that relates to the endpoint and all connections
                     #[inline]
-                    fn on_event<M: Meta, E: Event>(&#mode self, meta: &M, event: &E) {
+                    fn on_event<M: Meta, E: Event>(&#receiver self, meta: &M, event: &E) {
                         let _ = meta;
                         let _ = event;
                     }
@@ -287,8 +288,8 @@ impl ToTokens for Output {
                     /// Called for each event that relates to a connection
                     #[inline]
                     fn on_connection_event<E: Event>(
-                        &#mode self,
-                        context: &#mode Self::ConnectionContext,
+                        &#receiver self,
+                        context: &#receiver Self::ConnectionContext,
                         meta: &api::ConnectionMeta,
                         event: &E
                     ) {
@@ -319,7 +320,7 @@ impl ToTokens for Output {
 
                     #[inline]
                     fn create_connection_context(
-                        &#mode self,
+                        &#receiver self,
                         meta: &api::ConnectionMeta,
                         info: &api::ConnectionInfo
                     ) -> Self::ConnectionContext {
@@ -331,20 +332,20 @@ impl ToTokens for Output {
                     #tuple_subscriber
 
                     #[inline]
-                    fn on_event<M: Meta, E: Event>(&#mode self, meta: &M, event: &E) {
+                    fn on_event<M: Meta, E: Event>(&#receiver self, meta: &M, event: &E) {
                         self.0.on_event(meta, event);
                         self.1.on_event(meta, event);
                     }
 
                     #[inline]
                     fn on_connection_event<E: Event>(
-                        &#mode self,
-                        context: &#mode Self::ConnectionContext,
+                        &#receiver self,
+                        context: &#receiver Self::ConnectionContext,
                         meta: &api::ConnectionMeta,
                         event: &E
                     ) {
-                        self.0.on_connection_event(&#mode context.0, meta, event);
-                        self.1.on_connection_event(&#mode context.1, meta, event);
+                        self.0.on_connection_event(&#receiver context.0, meta, event);
+                        self.1.on_connection_event(&#receiver context.1, meta, event);
                     }
 
                     #[inline]
@@ -367,7 +368,7 @@ impl ToTokens for Output {
                 pub struct EndpointPublisherSubscriber<'a, Sub: Subscriber> {
                     meta: api::EndpointMeta,
                     quic_version: Option<u32>,
-                    subscriber: &'a #mode Sub,
+                    subscriber: &'a #receiver Sub,
                 }
 
                 impl<'a, Sub: Subscriber> fmt::Debug for EndpointPublisherSubscriber<'a, Sub> {
@@ -384,7 +385,7 @@ impl ToTokens for Output {
                     pub fn new(
                         meta: builder::EndpointMeta,
                         quic_version: Option<u32>,
-                        subscriber: &'a #mode Sub,
+                        subscriber: &'a #receiver Sub,
                     ) -> Self {
                         Self {
                             meta: meta.into_event(),
@@ -416,8 +417,8 @@ impl ToTokens for Output {
                 pub struct ConnectionPublisherSubscriber<'a, Sub: Subscriber> {
                     meta: api::ConnectionMeta,
                     quic_version: u32,
-                    subscriber: &'a #mode Sub,
-                    context: &'a #mode Sub::ConnectionContext,
+                    subscriber: &'a #receiver Sub,
+                    context: &'a #receiver Sub::ConnectionContext,
                 }
 
                 impl<'a, Sub: Subscriber> fmt::Debug for ConnectionPublisherSubscriber<'a, Sub> {
@@ -434,8 +435,8 @@ impl ToTokens for Output {
                     pub fn new(
                         meta: builder::ConnectionMeta,
                         quic_version: u32,
-                        subscriber: &'a #mode Sub,
-                        context: &'a #mode Sub::ConnectionContext
+                        subscriber: &'a #receiver Sub,
+                        context: &'a #receiver Sub::ConnectionContext
                     ) -> Self {
                         Self {
                             meta: meta.into_event(),
@@ -521,7 +522,7 @@ impl ToTokens for Output {
                         type ConnectionContext = ();
 
                         fn create_connection_context(
-                            &#mode self,
+                            &#receiver self,
                             _meta: &api::ConnectionMeta,
                             _info: &api::ConnectionInfo
                         ) -> Self::ConnectionContext {}
@@ -581,7 +582,7 @@ impl ToTokens for Output {
                     type ConnectionContext = ();
 
                     fn create_connection_context(
-                        &#mode self,
+                        &#receiver self,
                         _meta: &api::ConnectionMeta,
                         _info: &api::ConnectionInfo
                     ) -> Self::ConnectionContext {}

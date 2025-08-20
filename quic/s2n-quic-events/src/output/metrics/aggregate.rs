@@ -20,13 +20,12 @@ pub fn emit(output: &Output, files: &[File]) -> TokenStream {
         .filter(|s| s.attrs.event_name.is_some())
         .filter(|s| s.attrs.allow_deprecated.is_empty());
 
-    let mode = &output.mode;
-    let counter_type = &output.mode.counter_type();
-    let counter_increment = &output.mode.counter_increment();
-    let counter_init = &output.mode.counter_init();
-    let counter_load = &output.mode.counter_load();
+    let counter_type = &output.config.counter_type();
+    let counter_increment = &output.config.counter_increment();
+    let counter_init = &output.config.counter_init();
+    let counter_load = &output.config.counter_load();
 
-    let receiver = output.mode.receiver();
+    let receiver = output.config.receiver();
     let s2n_quic_core_path = &output.s2n_quic_core_path;
 
     let mut subscriber = quote!();
@@ -241,7 +240,7 @@ pub fn emit(output: &Output, files: &[File]) -> TokenStream {
                 let ctx_name = Ident::new(&format!("ctr_{id}"), Span::call_site());
 
                 let value = quote!(event.#field_name.as_u64());
-                let counter_increment = output.mode.counter_increment_by(value);
+                let counter_increment = output.config.counter_increment_by(value);
 
                 context_fields.extend(quote!(
                     #ctx_name: #counter_type,
@@ -333,7 +332,7 @@ pub fn emit(output: &Output, files: &[File]) -> TokenStream {
     let nominal_timers_probes = nominal_timers.probe();
     let nominal_timers_len = nominal_timers.len;
     let info_len = info.len;
-    let mut imports = output.mode.imports();
+    let mut imports = output.config.imports();
 
     if !output.feature_alloc.is_empty() {
         imports.extend(quote!(
@@ -539,7 +538,7 @@ pub fn emit(output: &Output, files: &[File]) -> TokenStream {
             type ConnectionContext = ConnectionContext;
 
             fn create_connection_context(
-                &#mode self,
+                &#receiver self,
                 meta: &api::ConnectionMeta,
                 _info: &api::ConnectionInfo
             ) -> Self::ConnectionContext {

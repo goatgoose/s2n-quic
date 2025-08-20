@@ -8,18 +8,18 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T, E = Error> = core::result::Result<T, E>;
 
 mod output;
-mod output_mode;
+mod output_config;
 mod parser;
 mod validation;
 
 use output::Output;
-use output_mode::OutputMode;
+use output_config::{OutputConfig, OutputMode};
 
 struct EventInfo<'a> {
     input_path: &'a str,
     output_path: &'a str,
     crate_name: &'a str,
-    output_mode: OutputMode,
+    output_config: OutputConfig,
     s2n_quic_core_path: TokenStream,
     api: TokenStream,
     builder: TokenStream,
@@ -68,7 +68,9 @@ impl EventInfo<'_> {
                 "/../s2n-quic-core/events/**/*.rs"
             ),
             output_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../s2n-quic-core/src/event"),
-            output_mode: OutputMode::Mut,
+            output_config: OutputConfig {
+                mode: OutputMode::Mut,
+            },
             s2n_quic_core_path: quote!(crate),
             api: quote!(),
             builder: quote!(),
@@ -115,7 +117,9 @@ impl EventInfo<'_> {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../dc/s2n-quic-dc/src/event"
             ),
-            output_mode: OutputMode::Ref,
+            output_config: OutputConfig {
+                mode: OutputMode::Ref,
+            },
             s2n_quic_core_path: quote!(s2n_quic_core),
             api: quote! {
                 pub use s2n_quic_core::event::api::{
@@ -166,7 +170,9 @@ impl EventInfo<'_> {
             crate_name: "tls",
             input_path: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/tls/events/**/*.rs"),
             output_path: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/tls/event"),
-            output_mode: OutputMode::Mut,
+            output_config: OutputConfig {
+                mode: OutputMode::Mut,
+            },
             s2n_quic_core_path: quote!(s2n_quic_core),
             api: quote!(),
             builder: quote! {
@@ -209,7 +215,7 @@ fn main() -> Result<()> {
         let root = root.canonicalize()?;
 
         let mut output = Output {
-            mode: event_info.output_mode,
+            config: event_info.output_config,
             s2n_quic_core_path: event_info.s2n_quic_core_path,
             api: event_info.api,
             builders: event_info.builder,
