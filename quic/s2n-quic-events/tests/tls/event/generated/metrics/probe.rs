@@ -18,8 +18,7 @@ mod counter {
         pub(crate) fn new(info: &'static Info) -> Self {
             match info.id {
                 0usize => Self(byte_array_event),
-                1usize => Self(enum_event),
-                3usize => Self(count_event),
+                1usize => Self(count_event),
                 _ => unreachable!("invalid info: {info:?}"),
             }
         }
@@ -33,8 +32,6 @@ mod counter {
         extern "probe" {
             # [link_name = tls__event__counter__byte_array_event]
             fn byte_array_event(value: u64);
-            # [link_name = tls__event__counter__enum_event]
-            fn enum_event(value: u64);
             # [link_name = tls__event__counter__count_event]
             fn count_event(value: u64);
         }
@@ -61,10 +58,7 @@ mod counter {
         pub struct Recorder(fn(u64, u64, &info::Str));
         impl Recorder {
             pub(crate) fn new(info: &'static Info, _variant: &'static info::Variant) -> Self {
-                match info.id {
-                    2usize => Self(enum_event__value),
-                    _ => unreachable!("invalid info: {info:?}"),
-                }
+                unreachable!("invalid info: {info:?}")
             }
         }
         impl NominalRecorder for Recorder {
@@ -77,12 +71,6 @@ mod counter {
                 (self.0)(value.as_u64(), variant.id as _, variant.name);
             }
         }
-        define!(
-            extern "probe" {
-                # [link_name = tls__event__counter__nominal__enum_event__value]
-                fn enum_event__value(value: u64, variant: u64, variant_name: &info::Str);
-            }
-        );
     }
 }
 mod measure {

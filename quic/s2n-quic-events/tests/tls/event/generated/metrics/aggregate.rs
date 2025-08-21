@@ -12,7 +12,7 @@ use crate::event::{
         AsVariant, BoolRecorder, Info, Metric, NominalRecorder, Recorder, Registry, Units,
     },
 };
-static INFO: &[Info; 4usize] = &[
+static INFO: &[Info; 2usize] = &[
     info::Builder {
         id: 0usize,
         name: Str::new("byte_array_event\0"),
@@ -21,18 +21,6 @@ static INFO: &[Info; 4usize] = &[
     .build(),
     info::Builder {
         id: 1usize,
-        name: Str::new("enum_event\0"),
-        units: Units::None,
-    }
-    .build(),
-    info::Builder {
-        id: 2usize,
-        name: Str::new("enum_event.value\0"),
-        units: Units::None,
-    }
-    .build(),
-    info::Builder {
-        id: 3usize,
         name: Str::new("count_event\0"),
         units: Units::None,
     }
@@ -45,13 +33,13 @@ pub struct ConnectionContext {
 }
 pub struct Subscriber<R: Registry> {
     #[allow(dead_code)]
-    counters: Box<[R::Counter; 3usize]>,
+    counters: Box<[R::Counter; 2usize]>,
     #[allow(dead_code)]
     bool_counters: Box<[R::BoolCounter; 0usize]>,
     #[allow(dead_code)]
     nominal_counters: Box<[R::NominalCounter]>,
     #[allow(dead_code)]
-    nominal_counter_offsets: Box<[usize; 1usize]>,
+    nominal_counter_offsets: Box<[usize; 0usize]>,
     #[allow(dead_code)]
     measures: Box<[R::Measure; 0usize]>,
     #[allow(dead_code)]
@@ -80,10 +68,10 @@ impl<R: Registry> Subscriber<R> {
     #[allow(unused_mut)]
     #[inline]
     pub fn new(registry: R) -> Self {
-        let mut counters = Vec::with_capacity(3usize);
+        let mut counters = Vec::with_capacity(2usize);
         let mut bool_counters = Vec::with_capacity(0usize);
-        let mut nominal_counters = Vec::with_capacity(1usize);
-        let mut nominal_counter_offsets = Vec::with_capacity(1usize);
+        let mut nominal_counters = Vec::with_capacity(0usize);
+        let mut nominal_counter_offsets = Vec::with_capacity(0usize);
         let mut measures = Vec::with_capacity(0usize);
         let mut gauges = Vec::with_capacity(0usize);
         let mut timers = Vec::with_capacity(0usize);
@@ -91,21 +79,9 @@ impl<R: Registry> Subscriber<R> {
         let mut nominal_timer_offsets = Vec::with_capacity(0usize);
         counters.push(registry.register_counter(&INFO[0usize]));
         counters.push(registry.register_counter(&INFO[1usize]));
-        counters.push(registry.register_counter(&INFO[3usize]));
         {
             #[allow(unused_imports)]
             use api::*;
-            {
-                let offset = nominal_counters.len();
-                let mut count = 0;
-                for variant in <TestEnum as AsVariant>::VARIANTS.iter() {
-                    nominal_counters
-                        .push(registry.register_nominal_counter(&INFO[2usize], variant));
-                    count += 1;
-                }
-                debug_assert_ne!(count, 0, "field type needs at least one variant");
-                nominal_counter_offsets.push(offset);
-            }
         }
         {
             #[allow(unused_imports)]
@@ -143,7 +119,6 @@ impl<R: Registry> Subscriber<R> {
             .map(|(idx, entry)| match idx {
                 0usize => (&INFO[0usize], entry),
                 1usize => (&INFO[1usize], entry),
-                2usize => (&INFO[3usize], entry),
                 _ => unsafe { core::hint::unreachable_unchecked() },
             })
     }
@@ -171,19 +146,9 @@ impl<R: Registry> Subscriber<R> {
     pub fn nominal_counters(
         &self,
     ) -> impl Iterator<Item = (&'static Info, &[R::NominalCounter], &[info::Variant])> + '_ {
+        #[allow(unused_imports)]
         use api::*;
-        self.nominal_counter_offsets
-            .iter()
-            .enumerate()
-            .map(|(idx, entry)| match idx {
-                0usize => {
-                    let offset = *entry;
-                    let variants = <TestEnum as AsVariant>::VARIANTS;
-                    let entries = &self.nominal_counters[offset..offset + variants.len()];
-                    (&INFO[2usize], entries, variants)
-                }
-                _ => unsafe { core::hint::unreachable_unchecked() },
-            })
+        core::iter::empty()
     }
     #[allow(dead_code)]
     #[inline(always)]
@@ -270,25 +235,10 @@ impl<R: Registry> event::Subscriber for Subscriber<R> {
         let _ = event;
     }
     #[inline]
-    fn on_enum_event(
-        &mut self,
-        context: &mut Self::ConnectionContext,
-        meta: &api::ConnectionMeta,
-        event: &api::EnumEvent,
-    ) {
-        #[allow(unused_imports)]
-        use api::*;
-        self.count(1usize, 1usize, 1usize);
-        self.count_nominal(2usize, 0usize, &event.value);
-        let _ = context;
-        let _ = meta;
-        let _ = event;
-    }
-    #[inline]
     fn on_count_event(&mut self, meta: &api::EndpointMeta, event: &api::CountEvent) {
         #[allow(unused_imports)]
         use api::*;
-        self.count(3usize, 2usize, 1usize);
+        self.count(1usize, 1usize, 1usize);
         let _ = event;
         let _ = meta;
     }

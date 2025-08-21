@@ -26,7 +26,6 @@ where
 pub struct Context<R: Recorder> {
     recorder: R,
     byte_array_event: u64,
-    enum_event: u64,
 }
 impl<R: Recorder> Context<R> {
     pub fn inner(&self) -> &R {
@@ -49,7 +48,6 @@ where
         Context {
             recorder: self.subscriber.create_connection_context(meta, info),
             byte_array_event: 0,
-            enum_event: 0,
         }
     }
     #[inline]
@@ -63,23 +61,10 @@ where
         self.subscriber
             .on_byte_array_event(&mut context.recorder, meta, event);
     }
-    #[inline]
-    fn on_enum_event(
-        &mut self,
-        context: &mut Self::ConnectionContext,
-        meta: &api::ConnectionMeta,
-        event: &api::EnumEvent,
-    ) {
-        context.enum_event += 1;
-        self.subscriber
-            .on_enum_event(&mut context.recorder, meta, event);
-    }
 }
 impl<R: Recorder> Drop for Context<R> {
     fn drop(&mut self) {
         self.recorder
             .increment_counter("byte_array_event", self.byte_array_event as _);
-        self.recorder
-            .increment_counter("enum_event", self.enum_event as _);
     }
 }
