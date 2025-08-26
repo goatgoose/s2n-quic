@@ -1,9 +1,19 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use s2n_events::{
+    output::Output,
+    output_mode::OutputMode,
+    validation,
+    parser,
+    Result,
+};
 use proc_macro2::TokenStream;
 use quote::quote;
+<<<<<<< HEAD:tools/s2n-events/src/main.rs
 use s2n_events::{Output, OutputMode, Result, parser, validation};
+=======
+>>>>>>> 68d931ff (refactor(s2n-events): Move event generation code out of s2n-events):tools/generate_events/src/main.rs
 
 struct EventInfo<'a> {
     input_path: &'a str,
@@ -54,8 +64,8 @@ impl EventInfo<'_> {
         EventInfo {
             crate_name: "s2n_quic",
             input_path: concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../quic/s2n-quic-core/events/**/*.rs"
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../quic/s2n-quic-core/events/**/*.rs"
             ),
             output_path: concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -101,12 +111,12 @@ impl EventInfo<'_> {
         EventInfo {
             crate_name: "s2n_quic_dc",
             input_path: concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../dc/s2n-quic-dc/events/**/*.rs"
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../dc/s2n-quic-dc/events/**/*.rs"
             ),
             output_path: concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../dc/s2n-quic-dc/src/event"
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../dc/s2n-quic-dc/src/event"
             ),
             output_mode: OutputMode::Ref,
             s2n_quic_core_path: quote!(s2n_quic_core),

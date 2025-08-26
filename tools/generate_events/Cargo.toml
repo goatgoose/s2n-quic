@@ -1,0 +1,10 @@
+[package]
+name = "generate_events"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+s2n-events = { path = "../s2n-events" }
+proc-macro2 = "1.0.101"
+quote = "1.0.40"
+glob = "0.3.3"
