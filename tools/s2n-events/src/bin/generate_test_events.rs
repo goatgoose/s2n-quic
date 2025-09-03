@@ -1,14 +1,9 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use s2n_events::{
-    Output,
-    validation,
-    parser,
-    Result,
-};
 use proc_macro2::TokenStream;
 use quote::quote;
+use s2n_events::{parser, validation, Output, Result};
 
 struct EventInfo<'a> {
     input_path: &'a str,
