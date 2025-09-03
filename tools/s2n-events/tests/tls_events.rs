@@ -4,9 +4,7 @@
 mod tls;
 
 use s2n_quic_core::{
-    application,
     event::IntoEvent,
-    inet,
     time::{testing::Clock as MockClock, Clock},
 };
 pub use tls::event;

@@ -61,9 +61,7 @@ impl EventInfo<'_> {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../quic/s2n-quic-core/src/event"
             ),
-            output_config: OutputConfig {
-                mode: OutputMode::Mut,
-            },
+            output_config: OutputConfig::default(),
             s2n_quic_core_path: quote!(crate),
             api: quote!(),
             builder: quote!(),
@@ -112,6 +110,7 @@ impl EventInfo<'_> {
             ),
             output_config: OutputConfig {
                 mode: OutputMode::Ref,
+                ..Default::default()
             },
             s2n_quic_core_path: quote!(s2n_quic_core),
             api: quote! {
