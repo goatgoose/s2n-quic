@@ -160,6 +160,20 @@ impl ToTokens for Output {
             }
         ));
 
+        let publisher_trait_imports = self.config.publisher_trait_imports();
+        let publisher_traits = self.config.publisher_traits(
+            endpoint_publisher,
+            endpoint_publisher_subscriber,
+            connection_publisher,
+            connection_publisher_subscriber,
+        );
+        let snapshot_publisher = self.config.snapshot_publisher(
+            testing_fields,
+            testing_fields_init,
+            endpoint_publisher_testing,
+            connection_publisher_testing,
+        );
+
         tokens.extend(quote!(
             #![allow(clippy::needless_lifetimes)]
 
@@ -216,9 +230,9 @@ impl ToTokens for Output {
             pub use traits::*;
             mod traits {
                 use super::*;
-                use core::fmt;
                 use #s2n_quic_core_path::query;
                 use crate::event::Meta;
+                #publisher_trait_imports
 
                 /// Allows for events to be subscribed to
                 pub trait Subscriber: #trait_constraints {
@@ -358,108 +372,7 @@ impl ToTokens for Output {
                     #query_mut_tuple
                 }
 
-                pub trait EndpointPublisher {
-                    #endpoint_publisher
-
-                    /// Returns the QUIC version, if any
-                    fn quic_version(&self) -> Option<u32>;
-                }
-
-                pub struct EndpointPublisherSubscriber<'a, Sub: Subscriber> {
-                    meta: api::EndpointMeta,
-                    quic_version: Option<u32>,
-                    subscriber: &'a #mode Sub,
-                }
-
-                impl<'a, Sub: Subscriber> fmt::Debug for EndpointPublisherSubscriber<'a, Sub> {
-                    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                        f.debug_struct("ConnectionPublisherSubscriber")
-                            .field("meta", &self.meta)
-                            .field("quic_version", &self.quic_version)
-                            .finish()
-                    }
-                }
-
-                impl<'a, Sub: Subscriber> EndpointPublisherSubscriber<'a, Sub> {
-                    #[inline]
-                    pub fn new(
-                        meta: builder::EndpointMeta,
-                        quic_version: Option<u32>,
-                        subscriber: &'a #mode Sub,
-                    ) -> Self {
-                        Self {
-                            meta: meta.into_event(),
-                            quic_version,
-                            subscriber,
-                        }
-                    }
-                }
-
-                impl<'a, Sub: Subscriber> EndpointPublisher for EndpointPublisherSubscriber<'a, Sub> {
-                    #endpoint_publisher_subscriber
-
-                    #[inline]
-                    fn quic_version(&self) -> Option<u32> {
-                        self.quic_version
-                    }
-                }
-
-                pub trait ConnectionPublisher {
-                    #connection_publisher
-
-                    /// Returns the QUIC version negotiated for the current connection, if any
-                    fn quic_version(&self) -> u32;
-
-                    /// Returns the [`Subject`] for the current publisher
-                    fn subject(&self) -> api::Subject;
-                }
-
-                pub struct ConnectionPublisherSubscriber<'a, Sub: Subscriber> {
-                    meta: api::ConnectionMeta,
-                    quic_version: u32,
-                    subscriber: &'a #mode Sub,
-                    context: &'a #mode Sub::ConnectionContext,
-                }
-
-                impl<'a, Sub: Subscriber> fmt::Debug for ConnectionPublisherSubscriber<'a, Sub> {
-                    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                        f.debug_struct("ConnectionPublisherSubscriber")
-                            .field("meta", &self.meta)
-                            .field("quic_version", &self.quic_version)
-                            .finish()
-                    }
-                }
-
-                impl<'a, Sub: Subscriber> ConnectionPublisherSubscriber<'a, Sub> {
-                    #[inline]
-                    pub fn new(
-                        meta: builder::ConnectionMeta,
-                        quic_version: u32,
-                        subscriber: &'a #mode Sub,
-                        context: &'a #mode Sub::ConnectionContext
-                    ) -> Self {
-                        Self {
-                            meta: meta.into_event(),
-                            quic_version,
-                            subscriber,
-                            context,
-                        }
-                    }
-                }
-
-                impl<'a, Sub: Subscriber> ConnectionPublisher for ConnectionPublisherSubscriber<'a, Sub> {
-                    #connection_publisher_subscriber
-
-                    #[inline]
-                    fn quic_version(&self) -> u32 {
-                        self.quic_version
-                    }
-
-                    #[inline]
-                    fn subject(&self) -> api::Subject {
-                        self.meta.subject()
-                    }
-                }
+                #publisher_traits
             }
 
             #[cfg(any(test, feature = "testing"))]
@@ -590,72 +503,7 @@ impl ToTokens for Output {
                     #subscriber_testing
                 }
 
-                #[derive(Debug)]
-                pub struct Publisher {
-                    location: Option<Location>,
-                    output: #testing_output_type,
-                    #testing_fields
-                }
-
-                impl Publisher {
-                    /// Creates a publisher with snapshot assertions enabled
-                    #[track_caller]
-                    pub fn snapshot() -> Self {
-                        let mut sub = Self::no_snapshot();
-                        sub.location = Location::from_thread_name();
-                        sub
-                    }
-
-                    /// Creates a subscriber with snapshot assertions enabled
-                    #[track_caller]
-                    pub fn named_snapshot<Name: core::fmt::Display>(name: Name) -> Self {
-                        let mut sub = Self::no_snapshot();
-                        sub.location = Some(Location::new(name));
-                        sub
-                    }
-
-                    /// Creates a publisher with snapshot assertions disabled
-                    pub fn no_snapshot() -> Self {
-                        Self {
-                            location: None,
-                            output: Default::default(),
-                            #testing_fields_init
-                        }
-                    }
-                }
-
-                impl super::EndpointPublisher for Publisher {
-                    #endpoint_publisher_testing
-
-                    fn quic_version(&self) -> Option<u32> {
-                        Some(1)
-                    }
-                }
-
-                impl super::ConnectionPublisher for Publisher {
-                    #connection_publisher_testing
-
-                    fn quic_version(&self) -> u32 {
-                        1
-                    }
-
-                    fn subject(&self) -> api::Subject {
-                        builder::Subject::Connection { id: 0 }.into_event()
-                    }
-                }
-
-                impl Drop for Publisher {
-                    fn drop(&mut self) {
-                        // don't make any assertions if we're already failing the test
-                        if std::thread::panicking() {
-                            return;
-                        }
-
-                        if let Some(location) = self.location.as_ref() {
-                            location.snapshot_log(&self.output #lock);
-                        }
-                    }
-                }
+                #snapshot_publisher
             }
         ));
     }

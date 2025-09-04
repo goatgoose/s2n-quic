@@ -8,7 +8,7 @@ use s2n_quic_core::{
     time::{testing::Clock as MockClock, Clock},
 };
 pub use tls::event;
-use tls::event::ConnectionPublisher;
+use crate::event::Subscriber;
 
 #[test]
 fn publish_byte_array_event() {
@@ -41,15 +41,10 @@ fn publish_byte_array_event() {
     };
 
     let timestamp = MockClock::default().get_time().into_event();
+    let meta = event::api::ConnectionMeta { id: 0, timestamp };
     let mut context = ();
-    let mut publisher = event::ConnectionPublisherSubscriber::new(
-        event::builder::ConnectionMeta { id: 0, timestamp },
-        0,
-        &mut subscriber,
-        &mut context,
-    );
-
-    publisher.on_byte_array_event(event::builder::ByteArrayEvent { data: &[1, 2, 3] });
+    let event = event::api::ByteArrayEvent { data: &[1, 2, 3] };
+    subscriber.on_byte_array_event(&mut context, &meta, &event);
 
     assert_eq!(subscriber.received_data, vec![1, 2, 3]);
 }
