@@ -1,15 +1,12 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Output, Result};
+use crate::{Output, PublisherTarget, Result};
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::{quote, ToTokens};
+use quote::{format_ident, quote, ToTokens};
 use std::path::PathBuf;
-use syn::{
-    parse::{Parse, ParseStream},
-    Meta, Token,
-};
+use syn::{parse::{Parse, ParseStream}, Meta, Token};
 
 pub fn parse(contents: &str, path: PathBuf) -> Result<File> {
     let file = syn::parse_str(contents)?;
@@ -117,6 +114,23 @@ impl Struct {
         let api_fields = fields.iter().map(Field::api);
         let snapshot_fields = fields.iter().map(Field::snapshot);
 
+        if attrs.repr_c {
+            assert!(
+                attrs.event_name.is_none(),
+                "C builder structs cannot be directly used as events."
+            );
+
+            output.c_ffi_content.extend(quote!(
+                #[repr(C)]
+                #extra_attrs
+                pub struct #ident {
+                    #(#builder_fields)*
+                }
+            ));
+
+            return;
+        }
+
         if attrs.builder_derive {
             output.builders.extend(quote!(
                 #[#builder_derive_attrs]
@@ -129,7 +143,9 @@ impl Struct {
             pub struct #ident #generics {
                 #(#builder_fields)*
             }
+        ));
 
+        output.builders.extend(quote!(
             #allow_deprecated
             impl #generics IntoEvent<api::#ident #generics> for #ident #generics {
                 #[inline]
@@ -405,6 +421,47 @@ impl Struct {
                             }
                         }
                     ));
+
+                    if let PublisherTarget::C = output.config.publisher {
+                        assert!(
+                            &attrs.c_arg_struct_name.is_some(),
+                            "A C argument struct must be define for {}", ident_str
+                        );
+
+                        let c_arg_struct_name = &attrs.c_arg_struct_name.clone().unwrap();
+
+                        output.c_ffi_publisher_event_trigger_definitions.extend(quote!(
+                            #function: fn(
+                            s2n_event_connection_publisher_ptr: *mut s2n_event_connection_publisher,
+                            event_ptr: *const #c_arg_struct_name,
+                            ),
+                        ));
+
+                        output.c_ffi_publisher_event_trigger_inits.extend(quote!(
+                            #function: |publisher, event| {
+                                let publisher = unsafe {
+                                    (*publisher).connection_publisher_subscriber::<S>()
+                                };
+                                publisher.#function(event.into_event());
+                            },
+                        ));
+
+                        let c_function = format_ident!(
+                            "s2n_event_connection_publisher_{}",
+                            function
+                        );
+                        output.c_ffi_content.extend(quote!(
+                            #[unsafe(no_mangle)]
+                            pub unsafe extern "C" fn #c_function(
+                                publisher: *mut s2n_event_connection_publisher,
+                                event: *const #c_arg_struct_name,
+                            ) -> c_int {
+                                let publisher_ref = &*publisher;
+                                (publisher_ref.#function)(publisher, event);
+                                0
+                            }
+                        ))
+                    }
                 }
             }
         }
@@ -543,6 +600,8 @@ pub struct ContainerAttrs {
     pub checkpoint: Vec<Checkpoint>,
     pub measure_counter: Vec<Metric>,
     pub extra: TokenStream,
+    pub c_arg_struct_name: Option<TokenStream>,
+    pub repr_c: bool,
 }
 
 impl ContainerAttrs {
@@ -563,6 +622,8 @@ impl ContainerAttrs {
             checkpoint: vec![],
             measure_counter: vec![],
             extra: quote!(),
+            c_arg_struct_name: None,
+            repr_c: false,
         };
 
         for attr in attrs {
@@ -591,6 +652,13 @@ impl ContainerAttrs {
                 v.checkpoint.push(attr.parse_args().unwrap());
             } else if path.is_ident("measure_counter") {
                 v.measure_counter.push(attr.parse_args().unwrap());
+            } else if path.is_ident("c_argument") {
+                v.c_arg_struct_name = Some(attr.parse_args().unwrap());
+            } else if path.is_ident("repr") {
+                let repr: TokenStream = attr.parse_args().unwrap();
+                if repr.to_string() == "C" {
+                    v.repr_c = true;
+                }
             } else {
                 attr.to_tokens(&mut v.extra)
             }

@@ -96,51 +96,6 @@ pub mod api {
     }
     #[derive(Clone, Debug)]
     #[non_exhaustive]
-    pub struct EnumEvent {
-        pub value: TestEnum,
-    }
-    #[cfg(any(test, feature = "testing"))]
-    impl crate::event::snapshot::Fmt for EnumEvent {
-        fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
-            let mut fmt = fmt.debug_struct("EnumEvent");
-            fmt.field("value", &self.value);
-            fmt.finish()
-        }
-    }
-    impl Event for EnumEvent {
-        const NAME: &'static str = "enum_event";
-    }
-    #[derive(Clone, Debug)]
-    #[non_exhaustive]
-    pub enum TestEnum {
-        #[non_exhaustive]
-        TestValue1 {},
-        #[non_exhaustive]
-        TestValue2 {},
-    }
-    impl aggregate::AsVariant for TestEnum {
-        const VARIANTS: &'static [aggregate::info::Variant] = &[
-            aggregate::info::variant::Builder {
-                name: aggregate::info::Str::new("TEST_VALUE1\0"),
-                id: 0usize,
-            }
-            .build(),
-            aggregate::info::variant::Builder {
-                name: aggregate::info::Str::new("TEST_VALUE2\0"),
-                id: 1usize,
-            }
-            .build(),
-        ];
-        #[inline]
-        fn variant_idx(&self) -> usize {
-            match self {
-                Self::TestValue1 { .. } => 0usize,
-                Self::TestValue2 { .. } => 1usize,
-            }
-        }
-    }
-    #[derive(Clone, Debug)]
-    #[non_exhaustive]
     pub struct CountEvent {
         pub count: u32,
     }
@@ -154,6 +109,36 @@ pub mod api {
     }
     impl Event for CountEvent {
         const NAME: &'static str = "count_event";
+    }
+    impl IntoEvent<builder::ConnectionMeta> for *const c_ffi::s2n_event_connection_meta {
+        fn into_event(self) -> builder::ConnectionMeta {
+            let event = unsafe { &*self };
+            let duration = Duration::from_nanos(event.timestamp);
+            let timestamp =
+                unsafe { s2n_quic_core::time::Timestamp::from_duration(duration).into_event() };
+            builder::ConnectionMeta {
+                id: event.id,
+                timestamp,
+            }
+        }
+    }
+    impl IntoEvent<builder::ConnectionInfo> for *const c_ffi::s2n_event_connection_info {
+        fn into_event(self) -> builder::ConnectionInfo {
+            builder::ConnectionInfo {}
+        }
+    }
+    impl<'a> IntoEvent<builder::ByteArrayEvent<'a>> for *const c_ffi::s2n_event_byte_array {
+        fn into_event(self) -> builder::ByteArrayEvent<'a> {
+            unsafe {
+                let event = &*self;
+                builder::ByteArrayEvent {
+                    data: std::slice::from_raw_parts(
+                        event.data,
+                        event.data_len.try_into().unwrap(),
+                    ),
+                }
+            }
+        }
     }
 }
 pub mod tracing {
@@ -196,17 +181,6 @@ pub mod tracing {
             let id = context.id();
             let api::ByteArrayEvent { data } = event;
             tracing :: event ! (target : "byte_array_event" , parent : id , tracing :: Level :: DEBUG , { data = tracing :: field :: debug (data) });
-        }
-        #[inline]
-        fn on_enum_event(
-            &mut self,
-            context: &mut Self::ConnectionContext,
-            _meta: &api::ConnectionMeta,
-            event: &api::EnumEvent,
-        ) {
-            let id = context.id();
-            let api::EnumEvent { value } = event;
-            tracing :: event ! (target : "enum_event" , parent : id , tracing :: Level :: DEBUG , { value = tracing :: field :: debug (value) });
         }
         #[inline]
         fn on_count_event(&mut self, meta: &api::EndpointMeta, event: &api::CountEvent) {
@@ -278,34 +252,6 @@ pub mod builder {
             let ByteArrayEvent { data } = self;
             api::ByteArrayEvent {
                 data: data.into_event(),
-            }
-        }
-    }
-    #[derive(Clone, Debug)]
-    pub struct EnumEvent {
-        pub value: TestEnum,
-    }
-    impl IntoEvent<api::EnumEvent> for EnumEvent {
-        #[inline]
-        fn into_event(self) -> api::EnumEvent {
-            let EnumEvent { value } = self;
-            api::EnumEvent {
-                value: value.into_event(),
-            }
-        }
-    }
-    #[derive(Clone, Debug)]
-    pub enum TestEnum {
-        TestValue1,
-        TestValue2,
-    }
-    impl IntoEvent<api::TestEnum> for TestEnum {
-        #[inline]
-        fn into_event(self) -> api::TestEnum {
-            use api::TestEnum::*;
-            match self {
-                Self::TestValue1 => TestValue1 {},
-                Self::TestValue2 => TestValue2 {},
             }
         }
     }
@@ -392,18 +338,6 @@ mod traits {
             let _ = meta;
             let _ = event;
         }
-        #[doc = "Called when the `EnumEvent` event is triggered"]
-        #[inline]
-        fn on_enum_event(
-            &mut self,
-            context: &mut Self::ConnectionContext,
-            meta: &api::ConnectionMeta,
-            event: &api::EnumEvent,
-        ) {
-            let _ = context;
-            let _ = meta;
-            let _ = event;
-        }
         #[doc = "Called when the `CountEvent` event is triggered"]
         #[inline]
         fn on_count_event(&mut self, meta: &api::EndpointMeta, event: &api::CountEvent) {
@@ -473,16 +407,6 @@ mod traits {
         ) {
             (self.0).on_byte_array_event(&mut context.0, meta, event);
             (self.1).on_byte_array_event(&mut context.1, meta, event);
-        }
-        #[inline]
-        fn on_enum_event(
-            &mut self,
-            context: &mut Self::ConnectionContext,
-            meta: &api::ConnectionMeta,
-            event: &api::EnumEvent,
-        ) {
-            (self.0).on_enum_event(&mut context.0, meta, event);
-            (self.1).on_enum_event(&mut context.1, meta, event);
         }
         #[inline]
         fn on_count_event(&mut self, meta: &api::EndpointMeta, event: &api::CountEvent) {
@@ -573,8 +497,6 @@ mod traits {
     pub trait ConnectionPublisher {
         #[doc = "Publishes a `ByteArrayEvent` event to the publisher's subscriber"]
         fn on_byte_array_event(&mut self, event: builder::ByteArrayEvent);
-        #[doc = "Publishes a `EnumEvent` event to the publisher's subscriber"]
-        fn on_enum_event(&mut self, event: builder::EnumEvent);
         #[doc = r" Returns the QUIC version negotiated for the current connection, if any"]
         fn quic_version(&self) -> u32;
         #[doc = r" Returns the [`Subject`] for the current publisher"]
@@ -621,15 +543,6 @@ mod traits {
             self.subscriber.on_event(&self.meta, &event);
         }
         #[inline]
-        fn on_enum_event(&mut self, event: builder::EnumEvent) {
-            let event = event.into_event();
-            self.subscriber
-                .on_enum_event(self.context, &self.meta, &event);
-            self.subscriber
-                .on_connection_event(self.context, &self.meta, &event);
-            self.subscriber.on_event(&self.meta, &event);
-        }
-        #[inline]
         fn quic_version(&self) -> u32 {
             self.quic_version
         }
@@ -637,6 +550,162 @@ mod traits {
         fn subject(&self) -> api::Subject {
             self.meta.subject()
         }
+    }
+}
+pub mod c_ffi {
+    use super::*;
+    use std::ffi::*;
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_subscriber {
+        subscriber_ptr: *mut c_void,
+        connection_publisher_new: fn(
+            s2n_event_subscriber_ptr: *mut s2n_event_subscriber,
+            meta_ptr: *const s2n_event_connection_meta,
+            info_ptr: *const s2n_event_connection_info,
+        ) -> *mut s2n_event_connection_publisher,
+        free: fn(s2n_event_subscriber_ptr: *mut s2n_event_subscriber) -> c_int,
+    }
+    impl s2n_event_subscriber {
+        fn from_ptr<'a>(s2n_event_subscriber_ptr: *mut s2n_event_subscriber) -> &'a mut Self {
+            unsafe { &mut *s2n_event_subscriber_ptr }
+        }
+        fn subscriber<S: Subscriber>(&self) -> &mut S {
+            let subscriber = self.subscriber_ptr as *mut S;
+            unsafe { &mut *subscriber }
+        }
+        fn free<S: Subscriber>(s2n_event_subscriber_ptr: *mut s2n_event_subscriber) -> c_int {
+            unsafe {
+                let subscriber_box = Box::from_raw(s2n_event_subscriber_ptr);
+                let _ = Box::from_raw(subscriber_box.subscriber_ptr as *mut S);
+            }
+            0
+        }
+        pub fn new<S: Subscriber>(subscriber: S) -> *mut Self {
+            let subscriber_ptr = Box::into_raw(Box::new(subscriber)) as *mut c_void;
+            Box::into_raw(Box::new(s2n_event_subscriber {
+                subscriber_ptr,
+                connection_publisher_new: s2n_event_connection_publisher::new::<S>,
+                free: s2n_event_subscriber::free::<S>,
+            }))
+        }
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn s2n_event_subscriber_free(
+        subscriber: *mut s2n_event_subscriber,
+    ) -> c_int {
+        let subscriber_ref = &*subscriber;
+        (subscriber_ref.free)(subscriber);
+        0
+    }
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_connection_publisher {
+        connection_publisher_subscriber_ptr: *mut c_void,
+        connection_context_ptr: *mut c_void,
+        free: fn(s2n_event_connection_publisher_ptr: *mut s2n_event_connection_publisher) -> c_int,
+        on_byte_array_event: fn(
+            s2n_event_connection_publisher_ptr: *mut s2n_event_connection_publisher,
+            event_ptr: *const s2n_event_byte_array,
+        ),
+    }
+    impl s2n_event_connection_publisher {
+        fn connection_publisher_subscriber<S: Subscriber>(
+            &self,
+        ) -> &mut ConnectionPublisherSubscriber<'_, S> {
+            let publisher = self.connection_publisher_subscriber_ptr;
+            let publisher = publisher as *mut ConnectionPublisherSubscriber<S>;
+            unsafe { &mut *publisher }
+        }
+        fn free<S: Subscriber>(
+            s2n_event_connection_publisher_ptr: *mut s2n_event_connection_publisher,
+        ) -> c_int {
+            unsafe {
+                let publisher_box = Box::from_raw(s2n_event_connection_publisher_ptr);
+                let _ = Box::from_raw(
+                    publisher_box.connection_context_ptr as *mut S::ConnectionContext,
+                );
+                let _ = Box::from_raw(
+                    publisher_box.connection_publisher_subscriber_ptr
+                        as *mut ConnectionPublisherSubscriber<S>,
+                );
+            }
+            0
+        }
+        fn new<S: Subscriber>(
+            s2n_event_subscriber_ptr: *mut s2n_event_subscriber,
+            meta_ptr: *const s2n_event_connection_meta,
+            info_ptr: *const s2n_event_connection_info,
+        ) -> *mut s2n_event_connection_publisher {
+            let meta = meta_ptr.into_event();
+            let info = info_ptr.into_event();
+            let subscriber = {
+                let event_subscriber = s2n_event_subscriber::from_ptr(s2n_event_subscriber_ptr);
+                event_subscriber.subscriber::<S>()
+            };
+            let connection_context_ptr =
+                Box::into_raw(Box::new(subscriber.create_connection_context(
+                    &meta.clone().into_event(),
+                    &info.clone().into_event(),
+                ))) as *mut c_void;
+            let connection_publisher_subscriber_ptr = {
+                let context_ref =
+                    unsafe { &mut *(connection_context_ptr as *mut S::ConnectionContext) };
+                Box::into_raw(Box::new(ConnectionPublisherSubscriber::new(
+                    meta,
+                    0,
+                    subscriber,
+                    context_ref,
+                ))) as *mut c_void
+            };
+            Box::into_raw(Box::new(s2n_event_connection_publisher {
+                connection_publisher_subscriber_ptr,
+                connection_context_ptr,
+                free: s2n_event_connection_publisher::free::<S>,
+                on_byte_array_event: |publisher, event| {
+                    let publisher = unsafe { (*publisher).connection_publisher_subscriber::<S>() };
+                    publisher.on_byte_array_event(event.into_event());
+                },
+            }))
+        }
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn s2n_event_connection_publisher_new(
+        subscriber: *mut s2n_event_subscriber,
+        meta: *const s2n_event_connection_meta,
+        info: *const s2n_event_connection_info,
+    ) -> *mut s2n_event_connection_publisher {
+        let subscriber_ref = &*subscriber;
+        (subscriber_ref.connection_publisher_new)(subscriber, meta, info)
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn s2n_event_connection_publisher_free(
+        publisher: *mut s2n_event_connection_publisher,
+    ) -> c_int {
+        let publisher_ref = &*publisher;
+        (publisher_ref.free)(publisher)
+    }
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_connection_meta {
+        pub id: u64,
+        pub timestamp: u64,
+    }
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_connection_info {}
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_byte_array {
+        pub data: *mut u8,
+        pub data_len: u32,
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn s2n_event_connection_publisher_on_byte_array_event(
+        publisher: *mut s2n_event_connection_publisher,
+        event: *const s2n_event_byte_array,
+    ) -> c_int {
+        let publisher_ref = &*publisher;
+        (publisher_ref.on_byte_array_event)(publisher, event);
+        0
     }
 }
 #[cfg(any(test, feature = "testing"))]
@@ -706,7 +775,6 @@ pub mod testing {
         location: Option<Location>,
         output: Vec<String>,
         pub byte_array_event: u64,
-        pub enum_event: u64,
         pub count_event: u64,
     }
     impl Drop for Subscriber {
@@ -740,7 +808,6 @@ pub mod testing {
                 location: None,
                 output: Default::default(),
                 byte_array_event: 0,
-                enum_event: 0,
                 count_event: 0,
             }
         }
@@ -767,20 +834,6 @@ pub mod testing {
                 self.output.push(out);
             }
         }
-        fn on_enum_event(
-            &mut self,
-            _context: &mut Self::ConnectionContext,
-            meta: &api::ConnectionMeta,
-            event: &api::EnumEvent,
-        ) {
-            self.enum_event += 1;
-            if self.location.is_some() {
-                let meta = crate::event::snapshot::Fmt::to_snapshot(meta);
-                let event = crate::event::snapshot::Fmt::to_snapshot(event);
-                let out = format!("{meta:?} {event:?}");
-                self.output.push(out);
-            }
-        }
         fn on_count_event(&mut self, meta: &api::EndpointMeta, event: &api::CountEvent) {
             self.count_event += 1;
             let meta = crate::event::snapshot::Fmt::to_snapshot(meta);
@@ -794,7 +847,6 @@ pub mod testing {
         location: Option<Location>,
         output: Vec<String>,
         pub byte_array_event: u64,
-        pub enum_event: u64,
         pub count_event: u64,
     }
     impl Publisher {
@@ -818,7 +870,6 @@ pub mod testing {
                 location: None,
                 output: Default::default(),
                 byte_array_event: 0,
-                enum_event: 0,
                 count_event: 0,
             }
         }
@@ -838,15 +889,6 @@ pub mod testing {
     impl super::ConnectionPublisher for Publisher {
         fn on_byte_array_event(&mut self, event: builder::ByteArrayEvent) {
             self.byte_array_event += 1;
-            let event = event.into_event();
-            if self.location.is_some() {
-                let event = crate::event::snapshot::Fmt::to_snapshot(&event);
-                let out = format!("{event:?}");
-                self.output.push(out);
-            }
-        }
-        fn on_enum_event(&mut self, event: builder::EnumEvent) {
-            self.enum_event += 1;
             let event = event.into_event();
             if self.location.is_some() {
                 let event = crate::event::snapshot::Fmt::to_snapshot(&event);
