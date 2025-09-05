@@ -543,6 +543,7 @@ pub struct ContainerAttrs {
     pub checkpoint: Vec<Checkpoint>,
     pub measure_counter: Vec<Metric>,
     pub extra: TokenStream,
+    pub repr_c_variant: Option<TokenStream>,
 }
 
 impl ContainerAttrs {
@@ -563,6 +564,7 @@ impl ContainerAttrs {
             checkpoint: vec![],
             measure_counter: vec![],
             extra: quote!(),
+            repr_c_variant: None,
         };
 
         for attr in attrs {
@@ -591,6 +593,8 @@ impl ContainerAttrs {
                 v.checkpoint.push(attr.parse_args().unwrap());
             } else if path.is_ident("measure_counter") {
                 v.measure_counter.push(attr.parse_args().unwrap());
+            }else if path.is_ident("repr_c_variant") {
+                v.repr_c_variant = Some(attr.parse_args().unwrap());
             } else {
                 attr.to_tokens(&mut v.extra)
             }

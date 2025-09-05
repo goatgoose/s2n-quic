@@ -174,6 +174,8 @@ impl ToTokens for Output {
             connection_publisher_testing,
         );
 
+        let c_ffi_module = self.config.c_ffi_module();
+
         tokens.extend(quote!(
             #![allow(clippy::needless_lifetimes)]
 
@@ -223,6 +225,8 @@ impl ToTokens for Output {
                 use super::*;
 
                 #builders
+
+                #c_ffi_module
             }
 
             #supervisor

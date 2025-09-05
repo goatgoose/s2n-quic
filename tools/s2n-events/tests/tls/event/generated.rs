@@ -238,6 +238,8 @@ pub mod builder {
             }
         }
     }
+    #[doc = r" C module content"]
+    mod c_ffi {}
 }
 pub use traits::*;
 mod traits {

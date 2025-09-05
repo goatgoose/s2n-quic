@@ -550,6 +550,17 @@ impl OutputConfig {
             }
         )
     }
+
+    pub fn c_ffi_module(&self) -> TokenStream {
+        if let PublisherTarget::Rust = self.publisher {
+            return quote!();
+        }
+
+        quote!(
+            mod c_ffi {
+            }
+        )
+    }
 }
 
 impl ToTokens for OutputMode {
