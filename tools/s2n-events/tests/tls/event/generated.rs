@@ -96,51 +96,6 @@ pub mod api {
     }
     #[derive(Clone, Debug)]
     #[non_exhaustive]
-    pub struct EnumEvent {
-        pub value: TestEnum,
-    }
-    #[cfg(any(test, feature = "testing"))]
-    impl crate::event::snapshot::Fmt for EnumEvent {
-        fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
-            let mut fmt = fmt.debug_struct("EnumEvent");
-            fmt.field("value", &self.value);
-            fmt.finish()
-        }
-    }
-    impl Event for EnumEvent {
-        const NAME: &'static str = "enum_event";
-    }
-    #[derive(Clone, Debug)]
-    #[non_exhaustive]
-    pub enum TestEnum {
-        #[non_exhaustive]
-        TestValue1 {},
-        #[non_exhaustive]
-        TestValue2 {},
-    }
-    impl aggregate::AsVariant for TestEnum {
-        const VARIANTS: &'static [aggregate::info::Variant] = &[
-            aggregate::info::variant::Builder {
-                name: aggregate::info::Str::new("TEST_VALUE1\0"),
-                id: 0usize,
-            }
-            .build(),
-            aggregate::info::variant::Builder {
-                name: aggregate::info::Str::new("TEST_VALUE2\0"),
-                id: 1usize,
-            }
-            .build(),
-        ];
-        #[inline]
-        fn variant_idx(&self) -> usize {
-            match self {
-                Self::TestValue1 { .. } => 0usize,
-                Self::TestValue2 { .. } => 1usize,
-            }
-        }
-    }
-    #[derive(Clone, Debug)]
-    #[non_exhaustive]
     pub struct CountEvent {
         pub count: u32,
     }
@@ -196,17 +151,6 @@ pub mod tracing {
             let id = context.id();
             let api::ByteArrayEvent { data } = event;
             tracing :: event ! (target : "byte_array_event" , parent : id , tracing :: Level :: DEBUG , { data = tracing :: field :: debug (data) });
-        }
-        #[inline]
-        fn on_enum_event(
-            &mut self,
-            context: &mut Self::ConnectionContext,
-            _meta: &api::ConnectionMeta,
-            event: &api::EnumEvent,
-        ) {
-            let id = context.id();
-            let api::EnumEvent { value } = event;
-            tracing :: event ! (target : "enum_event" , parent : id , tracing :: Level :: DEBUG , { value = tracing :: field :: debug (value) });
         }
         #[inline]
         fn on_count_event(&mut self, meta: &api::EndpointMeta, event: &api::CountEvent) {
@@ -278,34 +222,6 @@ pub mod builder {
             let ByteArrayEvent { data } = self;
             api::ByteArrayEvent {
                 data: data.into_event(),
-            }
-        }
-    }
-    #[derive(Clone, Debug)]
-    pub struct EnumEvent {
-        pub value: TestEnum,
-    }
-    impl IntoEvent<api::EnumEvent> for EnumEvent {
-        #[inline]
-        fn into_event(self) -> api::EnumEvent {
-            let EnumEvent { value } = self;
-            api::EnumEvent {
-                value: value.into_event(),
-            }
-        }
-    }
-    #[derive(Clone, Debug)]
-    pub enum TestEnum {
-        TestValue1,
-        TestValue2,
-    }
-    impl IntoEvent<api::TestEnum> for TestEnum {
-        #[inline]
-        fn into_event(self) -> api::TestEnum {
-            use api::TestEnum::*;
-            match self {
-                Self::TestValue1 => TestValue1 {},
-                Self::TestValue2 => TestValue2 {},
             }
         }
     }
@@ -391,18 +307,6 @@ mod traits {
             let _ = meta;
             let _ = event;
         }
-        #[doc = "Called when the `EnumEvent` event is triggered"]
-        #[inline]
-        fn on_enum_event(
-            &mut self,
-            context: &mut Self::ConnectionContext,
-            meta: &api::ConnectionMeta,
-            event: &api::EnumEvent,
-        ) {
-            let _ = context;
-            let _ = meta;
-            let _ = event;
-        }
         #[doc = "Called when the `CountEvent` event is triggered"]
         #[inline]
         fn on_count_event(&mut self, meta: &api::EndpointMeta, event: &api::CountEvent) {
@@ -472,16 +376,6 @@ mod traits {
         ) {
             (self.0).on_byte_array_event(&mut context.0, meta, event);
             (self.1).on_byte_array_event(&mut context.1, meta, event);
-        }
-        #[inline]
-        fn on_enum_event(
-            &mut self,
-            context: &mut Self::ConnectionContext,
-            meta: &api::ConnectionMeta,
-            event: &api::EnumEvent,
-        ) {
-            (self.0).on_enum_event(&mut context.0, meta, event);
-            (self.1).on_enum_event(&mut context.1, meta, event);
         }
         #[inline]
         fn on_count_event(&mut self, meta: &api::EndpointMeta, event: &api::CountEvent) {
@@ -592,7 +486,6 @@ pub mod testing {
         location: Option<Location>,
         output: Vec<String>,
         pub byte_array_event: u64,
-        pub enum_event: u64,
         pub count_event: u64,
     }
     impl Drop for Subscriber {
@@ -626,7 +519,6 @@ pub mod testing {
                 location: None,
                 output: Default::default(),
                 byte_array_event: 0,
-                enum_event: 0,
                 count_event: 0,
             }
         }
@@ -646,20 +538,6 @@ pub mod testing {
             event: &api::ByteArrayEvent,
         ) {
             self.byte_array_event += 1;
-            if self.location.is_some() {
-                let meta = crate::event::snapshot::Fmt::to_snapshot(meta);
-                let event = crate::event::snapshot::Fmt::to_snapshot(event);
-                let out = format!("{meta:?} {event:?}");
-                self.output.push(out);
-            }
-        }
-        fn on_enum_event(
-            &mut self,
-            _context: &mut Self::ConnectionContext,
-            meta: &api::ConnectionMeta,
-            event: &api::EnumEvent,
-        ) {
-            self.enum_event += 1;
             if self.location.is_some() {
                 let meta = crate::event::snapshot::Fmt::to_snapshot(meta);
                 let event = crate::event::snapshot::Fmt::to_snapshot(event);
