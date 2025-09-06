@@ -20,6 +20,7 @@ impl<'a> IntoEvent<ByteArrayEvent<'a>> for *const s2n_event_byte_array {
 }
 
 #[event("byte_array_event")]
+#[repr_c_variant(s2n_event_byte_array)]
 struct ByteArrayEvent<'a> {
     data: &'a [u8],
 }

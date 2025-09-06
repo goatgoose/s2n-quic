@@ -213,6 +213,13 @@ pub mod builder {
         }
     }
     #[derive(Clone, Debug)]
+    #[allow(non_camel_case_types)]
+    #[repr(C)]
+    pub struct s2n_event_byte_array {
+        pub data: *mut u8,
+        pub data_len: u32,
+    }
+    #[derive(Clone, Debug)]
     pub struct ByteArrayEvent<'a> {
         pub data: &'a [u8],
     }
@@ -238,7 +245,6 @@ pub mod builder {
             }
         }
     }
-    #[doc = r" C module content"]
     mod c_ffi {}
 }
 pub use traits::*;

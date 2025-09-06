@@ -6,10 +6,7 @@ use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens};
 use std::path::PathBuf;
-use syn::{
-    parse::{Parse, ParseStream},
-    Meta, Token,
-};
+use syn::{parse::{Parse, ParseStream}, Meta, Token, Type};
 
 pub fn parse(contents: &str, path: PathBuf) -> Result<File> {
     let file = syn::parse_str(contents)?;
@@ -21,6 +18,7 @@ pub fn parse(contents: &str, path: PathBuf) -> Result<File> {
 pub struct File {
     pub structs: Vec<Struct>,
     pub enums: Vec<Enum>,
+    pub impls: Vec<Impl>,
     pub extra: TokenStream,
     pub path: PathBuf,
 }
@@ -38,6 +36,7 @@ impl File {
             match item {
                 syn::Item::Enum(v) => out.enums.push(Enum::parse(v)),
                 syn::Item::Struct(v) => out.structs.push(Struct::parse(v)),
+                syn::Item::Impl(v) => out.impls.push(Impl::parse(v)),
                 item => item.to_tokens(&mut out.extra),
             }
         }
@@ -48,10 +47,18 @@ impl File {
     pub(crate) fn to_tokens(&self, output: &mut Output) {
         self.extra.to_tokens(&mut output.extra);
         for v in &self.structs {
+            if let Some(repr_c_variant) = &v.attrs.repr_c_variant {
+                output.repr_c_variants.insert(repr_c_variant.to_string());
+            }
+        }
+        for v in &self.structs {
             v.to_tokens(output);
         }
         for v in &self.enums {
             v.to_tokens(output);
+        }
+        for v in &self.impls {
+
         }
     }
 }
@@ -117,6 +124,23 @@ impl Struct {
         let api_fields = fields.iter().map(Field::api);
         let snapshot_fields = fields.iter().map(Field::snapshot);
 
+        output.builders.extend(quote!(
+            #[derive(Clone, Debug)]
+            #extra_attrs
+            pub struct #ident #generics {
+                #(#builder_fields)*
+            }
+        ));
+
+        if output.repr_c_variants.contains(&ident_str) {
+            assert!(
+                attrs.event_name.is_none(),
+                "C argument structs cannot directly be used as events."
+            );
+
+            return;
+        }
+
         if attrs.builder_derive {
             output.builders.extend(quote!(
                 #[#builder_derive_attrs]
@@ -124,12 +148,6 @@ impl Struct {
         }
 
         output.builders.extend(quote!(
-            #[derive(Clone, Debug)]
-            #extra_attrs
-            pub struct #ident #generics {
-                #(#builder_fields)*
-            }
-
             #allow_deprecated
             impl #generics IntoEvent<api::#ident #generics> for #ident #generics {
                 #[inline]
@@ -605,6 +623,49 @@ impl ContainerAttrs {
         }
 
         v
+    }
+}
+
+struct Impl {
+    impl_item: syn::ItemImpl,
+}
+
+impl Impl {
+    fn parse(item: syn::ItemImpl) -> Self {
+        Self { impl_item: item }
+    }
+
+    fn is_repr_c_converter(&self, output: &Output) -> bool {
+        match self.impl_item.self_ty.as_ref() {
+            Type::Ptr(ptr) => {
+                if ptr.const_token.is_none() {
+                    return false;
+                }
+
+                match ptr.elem.as_ref() {
+                    Type::Path(path) => {
+                        let segments = &path.path.segments;
+                        if segments.len() != 1 {
+                            return false;
+                        }
+
+                        if output.repr_c_variants.contains(&segments.get(0).unwrap().ident.to_string()) {
+                            return true;
+                        }
+
+                        false
+                    }
+                    _ => false,
+                }
+            },
+            _ => false,
+        }
+    }
+
+    fn to_tokens(&self, output: &mut Output) {
+        if self.is_repr_c_converter(output) {
+            output.
+        }
     }
 }
 
