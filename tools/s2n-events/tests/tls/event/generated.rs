@@ -110,6 +110,19 @@ pub mod api {
     impl Event for CountEvent {
         const NAME: &'static str = "count_event";
     }
+    impl<'a> IntoEvent<ByteArrayEvent<'a>> for *const builder::s2n_event_byte_array {
+        fn into_event(self) -> ByteArrayEvent<'a> {
+            unsafe {
+                let event = &*self;
+                ByteArrayEvent {
+                    data: std::slice::from_raw_parts(
+                        event.data,
+                        event.data_len.try_into().unwrap(),
+                    ),
+                }
+            }
+        }
+    }
 }
 pub mod tracing {
     #![doc = r" This module contains event integration with [`tracing`](https://docs.rs/tracing)"]
@@ -214,7 +227,6 @@ pub mod builder {
     }
     #[derive(Clone, Debug)]
     #[allow(non_camel_case_types)]
-    #[repr(C)]
     pub struct s2n_event_byte_array {
         pub data: *mut u8,
         pub data_len: u32,

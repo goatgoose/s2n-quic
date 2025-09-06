@@ -1,7 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
 use crate::{parser::File, OutputConfig};
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
@@ -38,7 +37,6 @@ pub struct Output {
     pub top_level: TokenStream,
     pub feature_alloc: TokenStream,
     pub root: PathBuf,
-    pub repr_c_variants: HashSet<String>,
 }
 
 impl Output {
@@ -118,7 +116,6 @@ impl ToTokens for Output {
             feature_alloc: _,
             crate_name,
             root: _,
-            repr_c_variants: _,
         } = self;
 
         let mode = &self.config.mode;
