@@ -204,6 +204,7 @@ pub use traits::*;
 mod traits {
     use super::*;
     use crate::event::Meta;
+    use core::fmt;
     use s2n_quic_core::query;
     #[doc = r" Allows for events to be subscribed to"]
     pub trait Subscriber: 'static + Send {
@@ -379,6 +380,108 @@ mod traits {
                 .and_then(|| B::query_mut(&mut context.1, query))
         }
     }
+    pub trait EndpointPublisher {
+        #[doc = "Publishes a `CountEvent` event to the publisher's subscriber"]
+        fn on_count_event(&mut self, event: builder::CountEvent);
+        #[doc = r" Returns the QUIC version, if any"]
+        fn quic_version(&self) -> Option<u32>;
+    }
+    pub struct EndpointPublisherSubscriber<'a, Sub: Subscriber> {
+        meta: api::EndpointMeta,
+        quic_version: Option<u32>,
+        subscriber: &'a mut Sub,
+    }
+    impl<'a, Sub: Subscriber> fmt::Debug for EndpointPublisherSubscriber<'a, Sub> {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.debug_struct("ConnectionPublisherSubscriber")
+                .field("meta", &self.meta)
+                .field("quic_version", &self.quic_version)
+                .finish()
+        }
+    }
+    impl<'a, Sub: Subscriber> EndpointPublisherSubscriber<'a, Sub> {
+        #[inline]
+        pub fn new(
+            meta: builder::EndpointMeta,
+            quic_version: Option<u32>,
+            subscriber: &'a mut Sub,
+        ) -> Self {
+            Self {
+                meta: meta.into_event(),
+                quic_version,
+                subscriber,
+            }
+        }
+    }
+    impl<'a, Sub: Subscriber> EndpointPublisher for EndpointPublisherSubscriber<'a, Sub> {
+        #[inline]
+        fn on_count_event(&mut self, event: builder::CountEvent) {
+            let event = event.into_event();
+            self.subscriber.on_count_event(&self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
+        fn quic_version(&self) -> Option<u32> {
+            self.quic_version
+        }
+    }
+    pub trait ConnectionPublisher {
+        #[doc = "Publishes a `ByteArrayEvent` event to the publisher's subscriber"]
+        fn on_byte_array_event(&mut self, event: builder::ByteArrayEvent);
+        #[doc = r" Returns the QUIC version negotiated for the current connection, if any"]
+        fn quic_version(&self) -> u32;
+        #[doc = r" Returns the [`Subject`] for the current publisher"]
+        fn subject(&self) -> api::Subject;
+    }
+    pub struct ConnectionPublisherSubscriber<'a, Sub: Subscriber> {
+        meta: api::ConnectionMeta,
+        quic_version: u32,
+        subscriber: &'a mut Sub,
+        context: &'a mut Sub::ConnectionContext,
+    }
+    impl<'a, Sub: Subscriber> fmt::Debug for ConnectionPublisherSubscriber<'a, Sub> {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.debug_struct("ConnectionPublisherSubscriber")
+                .field("meta", &self.meta)
+                .field("quic_version", &self.quic_version)
+                .finish()
+        }
+    }
+    impl<'a, Sub: Subscriber> ConnectionPublisherSubscriber<'a, Sub> {
+        #[inline]
+        pub fn new(
+            meta: builder::ConnectionMeta,
+            quic_version: u32,
+            subscriber: &'a mut Sub,
+            context: &'a mut Sub::ConnectionContext,
+        ) -> Self {
+            Self {
+                meta: meta.into_event(),
+                quic_version,
+                subscriber,
+                context,
+            }
+        }
+    }
+    impl<'a, Sub: Subscriber> ConnectionPublisher for ConnectionPublisherSubscriber<'a, Sub> {
+        #[inline]
+        fn on_byte_array_event(&mut self, event: builder::ByteArrayEvent) {
+            let event = event.into_event();
+            self.subscriber
+                .on_byte_array_event(self.context, &self.meta, &event);
+            self.subscriber
+                .on_connection_event(self.context, &self.meta, &event);
+            self.subscriber.on_event(&self.meta, &event);
+        }
+        #[inline]
+        fn quic_version(&self) -> u32 {
+            self.quic_version
+        }
+        #[inline]
+        fn subject(&self) -> api::Subject {
+            self.meta.subject()
+        }
+    }
 }
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
@@ -512,6 +615,77 @@ pub mod testing {
             let event = crate::event::snapshot::Fmt::to_snapshot(event);
             let out = format!("{meta:?} {event:?}");
             self.output.push(out);
+        }
+    }
+    #[derive(Debug)]
+    pub struct Publisher {
+        location: Option<Location>,
+        output: Vec<String>,
+        pub byte_array_event: u64,
+        pub count_event: u64,
+    }
+    impl Publisher {
+        #[doc = r" Creates a publisher with snapshot assertions enabled"]
+        #[track_caller]
+        pub fn snapshot() -> Self {
+            let mut sub = Self::no_snapshot();
+            sub.location = Location::from_thread_name();
+            sub
+        }
+        #[doc = r" Creates a subscriber with snapshot assertions enabled"]
+        #[track_caller]
+        pub fn named_snapshot<Name: core::fmt::Display>(name: Name) -> Self {
+            let mut sub = Self::no_snapshot();
+            sub.location = Some(Location::new(name));
+            sub
+        }
+        #[doc = r" Creates a publisher with snapshot assertions disabled"]
+        pub fn no_snapshot() -> Self {
+            Self {
+                location: None,
+                output: Default::default(),
+                byte_array_event: 0,
+                count_event: 0,
+            }
+        }
+    }
+    impl super::EndpointPublisher for Publisher {
+        fn on_count_event(&mut self, event: builder::CountEvent) {
+            self.count_event += 1;
+            let event = event.into_event();
+            let event = crate::event::snapshot::Fmt::to_snapshot(&event);
+            let out = format!("{event:?}");
+            self.output.push(out);
+        }
+        fn quic_version(&self) -> Option<u32> {
+            Some(1)
+        }
+    }
+    impl super::ConnectionPublisher for Publisher {
+        fn on_byte_array_event(&mut self, event: builder::ByteArrayEvent) {
+            self.byte_array_event += 1;
+            let event = event.into_event();
+            if self.location.is_some() {
+                let event = crate::event::snapshot::Fmt::to_snapshot(&event);
+                let out = format!("{event:?}");
+                self.output.push(out);
+            }
+        }
+        fn quic_version(&self) -> u32 {
+            1
+        }
+        fn subject(&self) -> api::Subject {
+            builder::Subject::Connection { id: 0 }.into_event()
+        }
+    }
+    impl Drop for Publisher {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                return;
+            }
+            if let Some(location) = self.location.as_ref() {
+                location.snapshot_log(&self.output);
+            }
         }
     }
 }
