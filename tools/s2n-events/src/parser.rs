@@ -114,6 +114,23 @@ impl Struct {
         let api_fields = fields.iter().map(Field::api);
         let snapshot_fields = fields.iter().map(Field::snapshot);
 
+        if attrs.repr_c {
+            assert!(
+                attrs.event_name.is_none(),
+                "C argument structs cannot be directly used as events."
+            );
+
+            output.builders.extend(quote!(
+                #[repr(C)]
+                #extra_attrs
+                pub struct #ident {
+                    #(#builder_fields)*
+                }
+            ));
+
+            return;
+        }
+
         output.builders.extend(quote!(
             #[derive(Clone, Debug)]
             #extra_attrs
@@ -126,15 +143,6 @@ impl Struct {
             output.builders.extend(quote!(
                 #[#builder_derive_attrs]
             ));
-        }
-
-        if attrs.repr_c {
-            assert!(
-                attrs.event_name.is_none(),
-                "C argument structs cannot be directly used as events."
-            );
-
-            return;
         }
 
         output.builders.extend(quote!(

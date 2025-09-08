@@ -110,11 +110,11 @@ pub mod api {
     impl Event for CountEvent {
         const NAME: &'static str = "count_event";
     }
-    impl<'a> IntoEvent<ByteArrayEvent<'a>> for *const builder::s2n_event_byte_array {
-        fn into_event(self) -> ByteArrayEvent<'a> {
+    impl<'a> IntoEvent<builder::ByteArrayEvent<'a>> for *const builder::s2n_event_byte_array {
+        fn into_event(self) -> builder::ByteArrayEvent<'a> {
             unsafe {
                 let event = &*self;
-                ByteArrayEvent {
+                builder::ByteArrayEvent {
                     data: std::slice::from_raw_parts(
                         event.data,
                         event.data_len.try_into().unwrap(),
@@ -225,7 +225,7 @@ pub mod builder {
             }
         }
     }
-    #[derive(Clone, Debug)]
+    #[repr(C)]
     #[allow(non_camel_case_types)]
     pub struct s2n_event_byte_array {
         pub data: *mut u8,

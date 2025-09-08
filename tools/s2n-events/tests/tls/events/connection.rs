@@ -8,11 +8,11 @@ struct s2n_event_byte_array {
     pub data_len: u32,
 }
 
-impl<'a> IntoEvent<ByteArrayEvent<'a>> for *const builder::s2n_event_byte_array {
-    fn into_event(self) -> ByteArrayEvent<'a> {
+impl<'a> IntoEvent<builder::ByteArrayEvent<'a>> for *const builder::s2n_event_byte_array {
+    fn into_event(self) -> builder::ByteArrayEvent<'a> {
         unsafe {
             let event = &*self;
-            ByteArrayEvent {
+            builder::ByteArrayEvent {
                 data: std::slice::from_raw_parts(event.data, event.data_len.try_into().unwrap())
             }
         }
