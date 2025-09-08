@@ -110,11 +110,11 @@ pub mod api {
     impl Event for CountEvent {
         const NAME: &'static str = "count_event";
     }
-    impl<'a> IntoEvent<builder::ByteArrayEvent<'a>> for *const builder::s2n_event_byte_array {
-        fn into_event(self) -> builder::ByteArrayEvent<'a> {
+    impl<'a> IntoEvent<ByteArrayEvent<'a>> for *const builder::s2n_event_byte_array {
+        fn into_event(self) -> ByteArrayEvent<'a> {
             unsafe {
                 let event = &*self;
-                builder::ByteArrayEvent {
+                ByteArrayEvent {
                     data: std::slice::from_raw_parts(
                         event.data,
                         event.data_len.try_into().unwrap(),
@@ -176,39 +176,6 @@ pub mod tracing {
 pub mod builder {
     use super::*;
     #[derive(Clone, Debug)]
-    pub struct ConnectionMeta {
-        pub id: u64,
-        pub timestamp: Timestamp,
-    }
-    impl IntoEvent<api::ConnectionMeta> for ConnectionMeta {
-        #[inline]
-        fn into_event(self) -> api::ConnectionMeta {
-            let ConnectionMeta { id, timestamp } = self;
-            api::ConnectionMeta {
-                id: id.into_event(),
-                timestamp: timestamp.into_event(),
-            }
-        }
-    }
-    #[derive(Clone, Debug)]
-    pub struct EndpointMeta {}
-    impl IntoEvent<api::EndpointMeta> for EndpointMeta {
-        #[inline]
-        fn into_event(self) -> api::EndpointMeta {
-            let EndpointMeta {} = self;
-            api::EndpointMeta {}
-        }
-    }
-    #[derive(Clone, Debug)]
-    pub struct ConnectionInfo {}
-    impl IntoEvent<api::ConnectionInfo> for ConnectionInfo {
-        #[inline]
-        fn into_event(self) -> api::ConnectionInfo {
-            let ConnectionInfo {} = self;
-            api::ConnectionInfo {}
-        }
-    }
-    #[derive(Clone, Debug)]
     pub enum Subject {
         Endpoint,
         Connection { id: u64 },
@@ -230,32 +197,6 @@ pub mod builder {
     pub struct s2n_event_byte_array {
         pub data: *mut u8,
         pub data_len: u32,
-    }
-    #[derive(Clone, Debug)]
-    pub struct ByteArrayEvent<'a> {
-        pub data: &'a [u8],
-    }
-    impl<'a> IntoEvent<api::ByteArrayEvent<'a>> for ByteArrayEvent<'a> {
-        #[inline]
-        fn into_event(self) -> api::ByteArrayEvent<'a> {
-            let ByteArrayEvent { data } = self;
-            api::ByteArrayEvent {
-                data: data.into_event(),
-            }
-        }
-    }
-    #[derive(Clone, Debug)]
-    pub struct CountEvent {
-        pub count: u32,
-    }
-    impl IntoEvent<api::CountEvent> for CountEvent {
-        #[inline]
-        fn into_event(self) -> api::CountEvent {
-            let CountEvent { count } = self;
-            api::CountEvent {
-                count: count.into_event(),
-            }
-        }
     }
     mod c_ffi {}
 }

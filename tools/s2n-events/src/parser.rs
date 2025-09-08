@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Output, Result};
+use crate::{Output, PublisherTarget, Result};
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens};
@@ -117,7 +117,7 @@ impl Struct {
         if attrs.repr_c {
             assert!(
                 attrs.event_name.is_none(),
-                "C argument structs cannot be directly used as events."
+                "C builder structs cannot be directly used as events."
             );
 
             output.builders.extend(quote!(
@@ -131,35 +131,39 @@ impl Struct {
             return;
         }
 
-        output.builders.extend(quote!(
-            #[derive(Clone, Debug)]
-            #extra_attrs
-            pub struct #ident #generics {
-                #(#builder_fields)*
-            }
-        ));
-
-        if attrs.builder_derive {
+        // In Rust mode, the structs use to publish events are generated automatically generated
+        // from the event definitions. In C mode, these structs are declared manually.
+        if let PublisherTarget::Rust = output.config.publisher {
             output.builders.extend(quote!(
-                #[#builder_derive_attrs]
+                #[derive(Clone, Debug)]
+                #extra_attrs
+                pub struct #ident #generics {
+                    #(#builder_fields)*
+                }
             ));
-        }
 
-        output.builders.extend(quote!(
-            #allow_deprecated
-            impl #generics IntoEvent<api::#ident #generics> for #ident #generics {
-                #[inline]
-                fn into_event(self) -> api::#ident #generics {
-                    let #ident {
-                        #(#destructure_fields),*
-                    } = self;
+            if attrs.builder_derive {
+                output.builders.extend(quote!(
+                    #[#builder_derive_attrs]
+                ));
+            }
 
-                    api::#ident {
-                        #(#builder_field_impls)*
+            output.builders.extend(quote!(
+                #allow_deprecated
+                impl #generics IntoEvent<api::#ident #generics> for #ident #generics {
+                    #[inline]
+                    fn into_event(self) -> api::#ident #generics {
+                        let #ident {
+                            #(#destructure_fields),*
+                        } = self;
+
+                        api::#ident {
+                            #(#builder_field_impls)*
+                        }
                     }
                 }
-            }
-        ));
+            ));
+        }
 
         if attrs.derive {
             output.api.extend(quote!(#[derive(Clone, Debug)]));
