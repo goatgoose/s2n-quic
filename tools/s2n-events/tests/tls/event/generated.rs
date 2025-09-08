@@ -96,6 +96,20 @@ pub mod api {
     }
     #[derive(Clone, Debug)]
     #[non_exhaustive]
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_count {
+        pub count: u32,
+    }
+    #[cfg(any(test, feature = "testing"))]
+    impl crate::event::snapshot::Fmt for s2n_event_count {
+        fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+            let mut fmt = fmt.debug_struct("s2n_event_count");
+            fmt.field("count", &self.count);
+            fmt.finish()
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[non_exhaustive]
     pub struct CountEvent {
         pub count: u32,
     }
@@ -110,16 +124,41 @@ pub mod api {
     impl Event for CountEvent {
         const NAME: &'static str = "count_event";
     }
-    impl<'a> IntoEvent<ByteArrayEvent<'a>> for *const builder::s2n_event_byte_array {
-        fn into_event(self) -> ByteArrayEvent<'a> {
+    impl IntoEvent<builder::ConnectionMeta> for *const c_ffi::s2n_event_connection_meta {
+        fn into_event(self) -> builder::ConnectionMeta {
+            let event = unsafe { &*self };
+            let duration = Duration::from_nanos(event.timestamp);
+            let timestamp =
+                unsafe { s2n_quic_core::time::Timestamp::from_duration(duration).into_event() };
+            builder::ConnectionMeta {
+                id: event.id,
+                timestamp,
+            }
+        }
+    }
+    impl IntoEvent<builder::ConnectionInfo> for *const c_ffi::s2n_event_connection_info {
+        fn into_event(self) -> builder::ConnectionInfo {
+            builder::ConnectionInfo {}
+        }
+    }
+    impl<'a> IntoEvent<builder::ByteArrayEvent<'a>> for *const c_ffi::s2n_event_byte_array {
+        fn into_event(self) -> builder::ByteArrayEvent<'a> {
             unsafe {
                 let event = &*self;
-                ByteArrayEvent {
+                builder::ByteArrayEvent {
                     data: std::slice::from_raw_parts(
                         event.data,
                         event.data_len.try_into().unwrap(),
                     ),
                 }
+            }
+        }
+    }
+    impl<'a> IntoEvent<builder::CountEvent<'a>> for *const c_ffi::s2n_event_count {
+        fn into_event(self) -> builder::CountEvent<'a> {
+            unsafe {
+                let event = &*self;
+                builder::CountEvent { count: event.count }
             }
         }
     }
@@ -176,6 +215,39 @@ pub mod tracing {
 pub mod builder {
     use super::*;
     #[derive(Clone, Debug)]
+    pub struct ConnectionMeta {
+        pub id: u64,
+        pub timestamp: Timestamp,
+    }
+    impl IntoEvent<api::ConnectionMeta> for ConnectionMeta {
+        #[inline]
+        fn into_event(self) -> api::ConnectionMeta {
+            let ConnectionMeta { id, timestamp } = self;
+            api::ConnectionMeta {
+                id: id.into_event(),
+                timestamp: timestamp.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    pub struct EndpointMeta {}
+    impl IntoEvent<api::EndpointMeta> for EndpointMeta {
+        #[inline]
+        fn into_event(self) -> api::EndpointMeta {
+            let EndpointMeta {} = self;
+            api::EndpointMeta {}
+        }
+    }
+    #[derive(Clone, Debug)]
+    pub struct ConnectionInfo {}
+    impl IntoEvent<api::ConnectionInfo> for ConnectionInfo {
+        #[inline]
+        fn into_event(self) -> api::ConnectionInfo {
+            let ConnectionInfo {} = self;
+            api::ConnectionInfo {}
+        }
+    }
+    #[derive(Clone, Debug)]
     pub enum Subject {
         Endpoint,
         Connection { id: u64 },
@@ -192,13 +264,46 @@ pub mod builder {
             }
         }
     }
-    #[repr(C)]
-    #[allow(non_camel_case_types)]
-    pub struct s2n_event_byte_array {
-        pub data: *mut u8,
-        pub data_len: u32,
+    #[derive(Clone, Debug)]
+    pub struct ByteArrayEvent<'a> {
+        pub data: &'a [u8],
     }
-    mod c_ffi {}
+    impl<'a> IntoEvent<api::ByteArrayEvent<'a>> for ByteArrayEvent<'a> {
+        #[inline]
+        fn into_event(self) -> api::ByteArrayEvent<'a> {
+            let ByteArrayEvent { data } = self;
+            api::ByteArrayEvent {
+                data: data.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_count {
+        pub count: u32,
+    }
+    impl IntoEvent<api::s2n_event_count> for s2n_event_count {
+        #[inline]
+        fn into_event(self) -> api::s2n_event_count {
+            let s2n_event_count { count } = self;
+            api::s2n_event_count {
+                count: count.into_event(),
+            }
+        }
+    }
+    #[derive(Clone, Debug)]
+    pub struct CountEvent {
+        pub count: u32,
+    }
+    impl IntoEvent<api::CountEvent> for CountEvent {
+        #[inline]
+        fn into_event(self) -> api::CountEvent {
+            let CountEvent { count } = self;
+            api::CountEvent {
+                count: count.into_event(),
+            }
+        }
+    }
 }
 pub use traits::*;
 mod traits {
@@ -481,6 +586,98 @@ mod traits {
         fn subject(&self) -> api::Subject {
             self.meta.subject()
         }
+    }
+}
+mod c_ffi {
+    use super::*;
+    use std::ffi::*;
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_subscriber {
+        subscriber: *mut c_void,
+        connection_publisher_new: fn(
+            subscriber: *mut s2n_event_subscriber,
+            meta: *const s2n_event_connection_meta,
+            info: *const s2n_event_connection_info,
+        ) -> *mut s2n_event_connection_publisher,
+    }
+    impl s2n_event_subscriber {
+        pub fn new<S: api::Subscriber + Send + Sync + 'static>(subscriber: S) -> *mut Self {
+            let boxed_subscriber = Box::new(subscriber);
+            let subscriber_ptr = Box::into_raw(boxed_subscriber) as *mut c_void;
+            let c_subscriber = s2n_event_subscriber {
+                subscriber: subscriber_ptr,
+                connection_publisher_new: s2n_event_connection_publisher::new::<S>,
+            };
+            let boxed_c_subscriber = Box::new(c_subscriber);
+            Box::into_raw(boxed_c_subscriber)
+        }
+    }
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_connection_publisher {
+        connection_publisher_subscriber: *mut c_void,
+        connection_context: *mut c_void,
+        on_byte_array_event: fn(
+            connection_publisher: *mut s2n_event_connection_publisher,
+            event: *const s2n_event_byte_array,
+        ),
+        on_count_event: fn(
+            connection_publisher: *mut s2n_event_connection_publisher,
+            event: *const s2n_event_count,
+        ),
+    }
+    impl s2n_event_connection_publisher {
+        pub fn new<S: Subscriber + 'static + Send>(
+            event_subscriber: *mut s2n_event_subscriber,
+            meta: *const s2n_event_connection_meta,
+            info: *const s2n_event_connection_info,
+        ) -> *mut s2n_event_connection_publisher {
+            let meta = meta.into_event();
+            let info = info.into_event();
+            let subscriber = unsafe { &mut *((*event_subscriber).subscriber as *mut S) };
+            let mut context = subscriber
+                .create_connection_context(&meta.clone().into_event(), &info.clone().into_event());
+            let publisher_subscriber =
+                ConnectionPublisherSubscriber::new(meta, 0, subscriber, &mut context);
+            let publisher_subscriber_box = Box::new(publisher_subscriber);
+            let publisher_subscriber_ptr = Box::into_raw(publisher_subscriber_box) as *mut c_void;
+            let boxed_context = Box::new(context);
+            let context_ptr = Box::into_raw(boxed_context) as *mut c_void;
+            let publisher = s2n_event_connection_publisher {
+                connection_publisher_subscriber: publisher_subscriber_ptr,
+                connection_context: context_ptr,
+                on_byte_array_event: |connection_publisher, event| {
+                    let publisher = unsafe {
+                        &mut *((*connection_publisher).connection_publisher_subscriber
+                            as *mut ConnectionPublisherSubscriber<S>)
+                    };
+                    publisher.on_byte_array_event(event.into_event());
+                },
+                on_count_event: |connection_publisher, event| {
+                    let publisher = unsafe {
+                        &mut *((*connection_publisher).connection_publisher_subscriber
+                            as *mut ConnectionPublisherSubscriber<S>)
+                    };
+                    publisher.on_count_event(event.into_event());
+                },
+            };
+            let boxed_publisher = Box::new(publisher);
+            Box::into_raw(boxed_publisher)
+        }
+    }
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_connection_meta {
+        pub id: u64,
+        pub timestamp: u64,
+    }
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_connection_info {}
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    pub struct s2n_event_byte_array {
+        pub data: *mut u8,
+        pub data_len: u32,
     }
 }
 #[cfg(any(test, feature = "testing"))]

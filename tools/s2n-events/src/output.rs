@@ -37,6 +37,9 @@ pub struct Output {
     pub top_level: TokenStream,
     pub feature_alloc: TokenStream,
     pub root: PathBuf,
+    pub c_ffi_content: TokenStream,
+    pub c_ffi_publisher_event_trigger_definitions: TokenStream,
+    pub c_ffi_publisher_event_trigger_inits: TokenStream,
 }
 
 impl Output {
@@ -116,6 +119,9 @@ impl ToTokens for Output {
             feature_alloc: _,
             crate_name,
             root: _,
+            c_ffi_content,
+            c_ffi_publisher_event_trigger_definitions,
+            c_ffi_publisher_event_trigger_inits,
         } = self;
 
         let mode = &self.config.mode;
@@ -160,7 +166,11 @@ impl ToTokens for Output {
             }
         ));
 
-        let c_ffi_module = self.config.c_ffi_module();
+        let c_ffi = self.config.c_ffi(
+            c_ffi_content,
+            c_ffi_publisher_event_trigger_definitions,
+            c_ffi_publisher_event_trigger_inits
+        );
 
         tokens.extend(quote!(
             #![allow(clippy::needless_lifetimes)]
@@ -211,8 +221,6 @@ impl ToTokens for Output {
                 use super::*;
 
                 #builders
-
-                #c_ffi_module
             }
 
             #supervisor
@@ -465,6 +473,8 @@ impl ToTokens for Output {
                     }
                 }
             }
+
+            #c_ffi
 
             #[cfg(any(test, feature = "testing"))]
             pub mod testing {

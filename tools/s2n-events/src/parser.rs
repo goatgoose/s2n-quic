@@ -120,7 +120,7 @@ impl Struct {
                 "C builder structs cannot be directly used as events."
             );
 
-            output.builders.extend(quote!(
+            output.c_ffi_content.extend(quote!(
                 #[repr(C)]
                 #extra_attrs
                 pub struct #ident {
@@ -131,39 +131,35 @@ impl Struct {
             return;
         }
 
-        // In Rust mode, the structs use to publish events are generated automatically generated
-        // from the event definitions. In C mode, these structs are declared manually.
-        if let PublisherTarget::Rust = output.config.publisher {
-            output.builders.extend(quote!(
-                #[derive(Clone, Debug)]
-                #extra_attrs
-                pub struct #ident #generics {
-                    #(#builder_fields)*
-                }
-            ));
-
-            if attrs.builder_derive {
-                output.builders.extend(quote!(
-                    #[#builder_derive_attrs]
-                ));
+        output.builders.extend(quote!(
+            #[derive(Clone, Debug)]
+            #extra_attrs
+            pub struct #ident #generics {
+                #(#builder_fields)*
             }
+        ));
 
+        if attrs.builder_derive {
             output.builders.extend(quote!(
-                #allow_deprecated
-                impl #generics IntoEvent<api::#ident #generics> for #ident #generics {
-                    #[inline]
-                    fn into_event(self) -> api::#ident #generics {
-                        let #ident {
-                            #(#destructure_fields),*
-                        } = self;
-
-                        api::#ident {
-                            #(#builder_field_impls)*
-                        }
-                    }
-                }
+                #[#builder_derive_attrs]
             ));
         }
+
+        output.builders.extend(quote!(
+            #allow_deprecated
+            impl #generics IntoEvent<api::#ident #generics> for #ident #generics {
+                #[inline]
+                fn into_event(self) -> api::#ident #generics {
+                    let #ident {
+                        #(#destructure_fields),*
+                    } = self;
+
+                    api::#ident {
+                        #(#builder_field_impls)*
+                    }
+                }
+            }
+        ));
 
         if attrs.derive {
             output.api.extend(quote!(#[derive(Clone, Debug)]));
@@ -426,6 +422,29 @@ impl Struct {
                         }
                     ));
                 }
+            }
+
+            if let PublisherTarget::C = output.config.publisher {
+                assert!(
+                    &attrs.c_arg_struct_name.is_some(),
+                    "A C argument struct must be define for {}", ident_str
+                );
+
+                let c_arg_struct_name = &attrs.c_arg_struct_name.clone().unwrap();
+
+                output.c_ffi_publisher_event_trigger_definitions.extend(quote!(
+                    #function: fn(
+                        connection_publisher: *mut s2n_event_connection_publisher,
+                        event: *const #c_arg_struct_name,
+                    ),
+                ));
+
+                output.c_ffi_publisher_event_trigger_inits.extend(quote!(
+                    #function: |connection_publisher, event| {
+                        let publisher = unsafe { &mut *((*connection_publisher).connection_publisher_subscriber as *mut ConnectionPublisherSubscriber<S>) };
+                        publisher.#function(event.into_event());
+                    },
+                ));
             }
         }
     }

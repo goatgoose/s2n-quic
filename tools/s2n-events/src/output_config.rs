@@ -339,13 +339,94 @@ impl OutputConfig {
         }
     }
 
-    pub fn c_ffi_module(&self) -> TokenStream {
+    pub fn c_ffi(
+        &self,
+        c_ffi_content: &TokenStream,
+        c_ffi_publisher_event_trigger_definitions: &TokenStream,
+        c_ffi_publisher_event_trigger_inits: &TokenStream,
+    ) -> TokenStream {
         if let PublisherTarget::Rust = self.publisher {
             return quote!();
         }
 
+        let trait_constraints = self.trait_constraints();
+
         quote!(
             mod c_ffi {
+                use super::*;
+                use std::ffi::*;
+
+                #[allow(non_camel_case_types)]
+                pub struct s2n_event_subscriber {
+                    subscriber: *mut c_void,
+                    connection_publisher_new: fn(
+                        subscriber: *mut s2n_event_subscriber,
+                        meta: *const s2n_event_connection_meta,
+                        info: *const s2n_event_connection_info
+                    ) -> *mut s2n_event_connection_publisher,
+                }
+
+                impl s2n_event_subscriber {
+                    pub fn new<S: api::Subscriber + Send + Sync + 'static>(
+                        subscriber: S
+                    ) -> *mut Self {
+                        let boxed_subscriber = Box::new(subscriber);
+                        let subscriber_ptr = Box::into_raw(boxed_subscriber) as *mut c_void;
+
+                        let c_subscriber = s2n_event_subscriber {
+                            subscriber: subscriber_ptr,
+                            connection_publisher_new: s2n_event_connection_publisher::new::<S>,
+                        };
+                        let boxed_c_subscriber = Box::new(c_subscriber);
+                        Box::into_raw(boxed_c_subscriber)
+                    }
+                }
+
+                #[allow(non_camel_case_types)]
+                pub struct s2n_event_connection_publisher {
+                    connection_publisher_subscriber: *mut c_void,
+                    connection_context: *mut c_void,
+                    #c_ffi_publisher_event_trigger_definitions
+                }
+
+                impl s2n_event_connection_publisher {
+                    pub fn new<S: Subscriber + #trait_constraints>(
+                        event_subscriber: *mut s2n_event_subscriber,
+                        meta: *const s2n_event_connection_meta,
+                        info: *const s2n_event_connection_info,
+                    ) -> *mut s2n_event_connection_publisher {
+                        let meta = meta.into_event();
+                        let info = info.into_event();
+                        let subscriber = unsafe { &mut *((*event_subscriber).subscriber as *mut S) };
+
+                        let mut context = subscriber.create_connection_context(
+                            &meta.clone().into_event(),
+                            &info.clone().into_event()
+                        );
+                        let publisher_subscriber = ConnectionPublisherSubscriber::new(
+                            meta,
+                            0,
+                            subscriber,
+                            &mut context
+                        );
+
+                        let publisher_subscriber_box = Box::new(publisher_subscriber);
+                        let publisher_subscriber_ptr = Box::into_raw(publisher_subscriber_box) as *mut c_void;
+
+                        let boxed_context = Box::new(context);
+                        let context_ptr = Box::into_raw(boxed_context) as *mut c_void;
+
+                        let publisher = s2n_event_connection_publisher {
+                            connection_publisher_subscriber: publisher_subscriber_ptr,
+                            connection_context: context_ptr,
+                            #c_ffi_publisher_event_trigger_inits
+                        };
+                        let boxed_publisher = Box::new(publisher);
+                        Box::into_raw(boxed_publisher)
+                    }
+                }
+
+                #c_ffi_content
             }
         )
     }
