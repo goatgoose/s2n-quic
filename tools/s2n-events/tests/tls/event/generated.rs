@@ -96,20 +96,6 @@ pub mod api {
     }
     #[derive(Clone, Debug)]
     #[non_exhaustive]
-    #[allow(non_camel_case_types)]
-    pub struct s2n_event_count {
-        pub count: u32,
-    }
-    #[cfg(any(test, feature = "testing"))]
-    impl crate::event::snapshot::Fmt for s2n_event_count {
-        fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
-            let mut fmt = fmt.debug_struct("s2n_event_count");
-            fmt.field("count", &self.count);
-            fmt.finish()
-        }
-    }
-    #[derive(Clone, Debug)]
-    #[non_exhaustive]
     pub struct CountEvent {
         pub count: u32,
     }
@@ -151,14 +137,6 @@ pub mod api {
                         event.data_len.try_into().unwrap(),
                     ),
                 }
-            }
-        }
-    }
-    impl<'a> IntoEvent<builder::CountEvent<'a>> for *const c_ffi::s2n_event_count {
-        fn into_event(self) -> builder::CountEvent<'a> {
-            unsafe {
-                let event = &*self;
-                builder::CountEvent { count: event.count }
             }
         }
     }
@@ -274,20 +252,6 @@ pub mod builder {
             let ByteArrayEvent { data } = self;
             api::ByteArrayEvent {
                 data: data.into_event(),
-            }
-        }
-    }
-    #[derive(Clone, Debug)]
-    #[allow(non_camel_case_types)]
-    pub struct s2n_event_count {
-        pub count: u32,
-    }
-    impl IntoEvent<api::s2n_event_count> for s2n_event_count {
-        #[inline]
-        fn into_event(self) -> api::s2n_event_count {
-            let s2n_event_count { count } = self;
-            api::s2n_event_count {
-                count: count.into_event(),
             }
         }
     }
@@ -602,14 +566,11 @@ mod c_ffi {
     }
     impl s2n_event_subscriber {
         pub fn new<S: api::Subscriber + Send + Sync + 'static>(subscriber: S) -> *mut Self {
-            let boxed_subscriber = Box::new(subscriber);
-            let subscriber_ptr = Box::into_raw(boxed_subscriber) as *mut c_void;
-            let c_subscriber = s2n_event_subscriber {
+            let subscriber_ptr = Box::into_raw(Box::new(subscriber)) as *mut c_void;
+            Box::into_raw(Box::new(s2n_event_subscriber {
                 subscriber: subscriber_ptr,
                 connection_publisher_new: s2n_event_connection_publisher::new::<S>,
-            };
-            let boxed_c_subscriber = Box::new(c_subscriber);
-            Box::into_raw(boxed_c_subscriber)
+            }))
         }
     }
     #[allow(non_camel_case_types)]
@@ -620,10 +581,6 @@ mod c_ffi {
             connection_publisher: *mut s2n_event_connection_publisher,
             event: *const s2n_event_byte_array,
         ),
-        on_count_event: fn(
-            connection_publisher: *mut s2n_event_connection_publisher,
-            event: *const s2n_event_count,
-        ),
     }
     impl s2n_event_connection_publisher {
         pub fn new<S: Subscriber + 'static + Send>(
@@ -631,37 +588,30 @@ mod c_ffi {
             meta: *const s2n_event_connection_meta,
             info: *const s2n_event_connection_info,
         ) -> *mut s2n_event_connection_publisher {
-            let meta = meta.into_event();
-            let info = info.into_event();
-            let subscriber = unsafe { &mut *((*event_subscriber).subscriber as *mut S) };
+            let (meta, info, subscriber) = unsafe {
+                (
+                    meta.into_event(),
+                    info.into_event(),
+                    &mut *((*event_subscriber).subscriber as *mut S),
+                )
+            };
             let mut context = subscriber
                 .create_connection_context(&meta.clone().into_event(), &info.clone().into_event());
-            let publisher_subscriber =
-                ConnectionPublisherSubscriber::new(meta, 0, subscriber, &mut context);
-            let publisher_subscriber_box = Box::new(publisher_subscriber);
-            let publisher_subscriber_ptr = Box::into_raw(publisher_subscriber_box) as *mut c_void;
-            let boxed_context = Box::new(context);
-            let context_ptr = Box::into_raw(boxed_context) as *mut c_void;
-            let publisher = s2n_event_connection_publisher {
+            let publisher_subscriber_ptr = Box::into_raw(Box::new(
+                ConnectionPublisherSubscriber::new(meta, 0, subscriber, &mut context),
+            )) as *mut c_void;
+            let context_ptr = Box::into_raw(Box::new(context)) as *mut c_void;
+            Box::into_raw(Box::new(s2n_event_connection_publisher {
                 connection_publisher_subscriber: publisher_subscriber_ptr,
                 connection_context: context_ptr,
-                on_byte_array_event: |connection_publisher, event| {
+                on_byte_array_event: |publisher, event| {
                     let publisher = unsafe {
-                        &mut *((*connection_publisher).connection_publisher_subscriber
+                        &mut *((*publisher).connection_publisher_subscriber
                             as *mut ConnectionPublisherSubscriber<S>)
                     };
                     publisher.on_byte_array_event(event.into_event());
                 },
-                on_count_event: |connection_publisher, event| {
-                    let publisher = unsafe {
-                        &mut *((*connection_publisher).connection_publisher_subscriber
-                            as *mut ConnectionPublisherSubscriber<S>)
-                    };
-                    publisher.on_count_event(event.into_event());
-                },
-            };
-            let boxed_publisher = Box::new(publisher);
-            Box::into_raw(boxed_publisher)
+            }))
         }
     }
     #[repr(C)]

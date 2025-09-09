@@ -421,30 +421,34 @@ impl Struct {
                             }
                         }
                     ));
+
+                    if let PublisherTarget::C = output.config.publisher {
+                        assert!(
+                            &attrs.c_arg_struct_name.is_some(),
+                            "A C argument struct must be define for {}", ident_str
+                        );
+
+                        let c_arg_struct_name = &attrs.c_arg_struct_name.clone().unwrap();
+
+                        output.c_ffi_publisher_event_trigger_definitions.extend(quote!(
+                            #function: fn(
+                            connection_publisher: *mut s2n_event_connection_publisher,
+                            event: *const #c_arg_struct_name,
+                            ),
+                        ));
+
+                        output.c_ffi_publisher_event_trigger_inits.extend(quote!(
+                            #function: |publisher, event| {
+                                let publisher = unsafe { &mut *((*publisher).connection_publisher_subscriber as *mut ConnectionPublisherSubscriber<S>) };
+                                publisher.#function(event.into_event());
+                            },
+                        ));
+                        
+                        output.c_ffi_content.extend(quote!(
+                            
+                        ))
+                    }
                 }
-            }
-
-            if let PublisherTarget::C = output.config.publisher {
-                assert!(
-                    &attrs.c_arg_struct_name.is_some(),
-                    "A C argument struct must be define for {}", ident_str
-                );
-
-                let c_arg_struct_name = &attrs.c_arg_struct_name.clone().unwrap();
-
-                output.c_ffi_publisher_event_trigger_definitions.extend(quote!(
-                    #function: fn(
-                        connection_publisher: *mut s2n_event_connection_publisher,
-                        event: *const #c_arg_struct_name,
-                    ),
-                ));
-
-                output.c_ffi_publisher_event_trigger_inits.extend(quote!(
-                    #function: |connection_publisher, event| {
-                        let publisher = unsafe { &mut *((*connection_publisher).connection_publisher_subscriber as *mut ConnectionPublisherSubscriber<S>) };
-                        publisher.#function(event.into_event());
-                    },
-                ));
             }
         }
     }

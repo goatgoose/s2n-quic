@@ -169,7 +169,7 @@ impl ToTokens for Output {
         let c_ffi = self.config.c_ffi(
             c_ffi_content,
             c_ffi_publisher_event_trigger_definitions,
-            c_ffi_publisher_event_trigger_inits
+            c_ffi_publisher_event_trigger_inits,
         );
 
         tokens.extend(quote!(
