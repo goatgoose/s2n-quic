@@ -10,7 +10,6 @@ use s2n_quic_core::{
 };
 pub use tls::event;
 use tls::event::ConnectionPublisher;
-use crate::event::api::{ByteArrayEvent, ConnectionInfo, ConnectionMeta};
 use crate::event::Subscriber;
 
 #[test]

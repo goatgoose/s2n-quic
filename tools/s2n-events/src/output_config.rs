@@ -349,8 +349,6 @@ impl OutputConfig {
             return quote!();
         }
 
-        let trait_constraints = self.trait_constraints();
-
         quote!(
             pub mod c_ffi {
                 use super::*;
@@ -377,7 +375,7 @@ impl OutputConfig {
                     }
 
                     pub fn new<S: Subscriber>(
-                        mut subscriber: S
+                        subscriber: S
                     ) -> *mut Self {
                         let subscriber_ptr = Box::into_raw(Box::new(subscriber)) as *mut c_void;
                         Box::into_raw(Box::new(s2n_event_subscriber {
@@ -390,7 +388,7 @@ impl OutputConfig {
                 #[allow(non_camel_case_types)]
                 pub struct s2n_event_connection_publisher {
                     connection_publisher_subscriber_ptr: *mut c_void,
-                    connection_context_ptr: *mut c_void,
+                    _connection_context_ptr: *mut c_void,
                     #c_ffi_publisher_event_trigger_definitions
                 }
 
@@ -432,7 +430,7 @@ impl OutputConfig {
 
                         Box::into_raw(Box::new(s2n_event_connection_publisher {
                             connection_publisher_subscriber_ptr,
-                            connection_context_ptr,
+                            _connection_context_ptr: connection_context_ptr,
                             #c_ffi_publisher_event_trigger_inits
                         }))
                     }

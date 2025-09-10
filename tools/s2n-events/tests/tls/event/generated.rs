@@ -572,7 +572,7 @@ pub mod c_ffi {
             let subscriber = self.subscriber_ptr as *mut S;
             unsafe { &mut *subscriber }
         }
-        pub fn new<S: Subscriber>(mut subscriber: S) -> *mut Self {
+        pub fn new<S: Subscriber>(subscriber: S) -> *mut Self {
             let subscriber_ptr = Box::into_raw(Box::new(subscriber)) as *mut c_void;
             Box::into_raw(Box::new(s2n_event_subscriber {
                 subscriber_ptr,
@@ -583,7 +583,7 @@ pub mod c_ffi {
     #[allow(non_camel_case_types)]
     pub struct s2n_event_connection_publisher {
         connection_publisher_subscriber_ptr: *mut c_void,
-        connection_context_ptr: *mut c_void,
+        _connection_context_ptr: *mut c_void,
         on_byte_array_event: fn(
             s2n_event_connection_publisher_ptr: *mut s2n_event_connection_publisher,
             event_ptr: *const s2n_event_byte_array,
@@ -625,7 +625,7 @@ pub mod c_ffi {
             };
             Box::into_raw(Box::new(s2n_event_connection_publisher {
                 connection_publisher_subscriber_ptr,
-                connection_context_ptr,
+                _connection_context_ptr: connection_context_ptr,
                 on_byte_array_event: |publisher, event| {
                     let publisher = unsafe { (*publisher).connection_publisher_subscriber::<S>() };
                     publisher.on_byte_array_event(event.into_event());
