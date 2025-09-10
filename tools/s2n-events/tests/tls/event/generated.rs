@@ -552,63 +552,73 @@ mod traits {
         }
     }
 }
-mod c_ffi {
+pub mod c_ffi {
     use super::*;
     use std::ffi::*;
     #[allow(non_camel_case_types)]
     pub struct s2n_event_subscriber {
-        subscriber: *mut c_void,
+        subscriber_ptr: *mut c_void,
         connection_publisher_new: fn(
-            subscriber: *mut s2n_event_subscriber,
-            meta: *const s2n_event_connection_meta,
-            info: *const s2n_event_connection_info,
+            s2n_event_subscriber_ptr: *mut s2n_event_subscriber,
+            meta_ptr: *const s2n_event_connection_meta,
+            info_ptr: *const s2n_event_connection_info,
         ) -> *mut s2n_event_connection_publisher,
     }
     impl s2n_event_subscriber {
-        pub fn new<S: api::Subscriber + Send + Sync + 'static>(subscriber: S) -> *mut Self {
+        fn from_ptr<'a>(s2n_event_subscriber_ptr: *mut s2n_event_subscriber) -> &'a mut Self {
+            unsafe { &mut *s2n_event_subscriber_ptr }
+        }
+        fn subscriber<S: Subscriber>(&self) -> &mut S {
+            let subscriber = self.subscriber_ptr as *mut S;
+            unsafe { &mut *subscriber }
+        }
+        pub fn new<S: Subscriber>(subscriber: S) -> *mut Self {
             let subscriber_ptr = Box::into_raw(Box::new(subscriber)) as *mut c_void;
             Box::into_raw(Box::new(s2n_event_subscriber {
-                subscriber: subscriber_ptr,
+                subscriber_ptr,
                 connection_publisher_new: s2n_event_connection_publisher::new::<S>,
             }))
         }
     }
     #[allow(non_camel_case_types)]
     pub struct s2n_event_connection_publisher {
-        connection_publisher_subscriber: *mut c_void,
-        connection_context: *mut c_void,
+        connection_publisher_subscriber_ptr: *mut c_void,
+        connection_context_ptr: *mut c_void,
         on_byte_array_event: fn(
-            connection_publisher: *mut s2n_event_connection_publisher,
-            event: *const s2n_event_byte_array,
+            s2n_event_connection_publisher_ptr: *mut s2n_event_connection_publisher,
+            event_ptr: *const s2n_event_byte_array,
         ),
     }
     impl s2n_event_connection_publisher {
-        pub fn new<S: Subscriber + 'static + Send>(
-            event_subscriber: *mut s2n_event_subscriber,
-            meta: *const s2n_event_connection_meta,
-            info: *const s2n_event_connection_info,
+        fn connection_publisher_subscriber<S: Subscriber>(
+            &self,
+        ) -> &mut ConnectionPublisherSubscriber<S> {
+            let publisher = self.connection_publisher_subscriber_ptr;
+            let publisher = publisher as *mut ConnectionPublisherSubscriber<S>;
+            unsafe { &mut *publisher }
+        }
+        fn new<S: Subscriber>(
+            s2n_event_subscriber_ptr: *mut s2n_event_subscriber,
+            meta_ptr: *const s2n_event_connection_meta,
+            info_ptr: *const s2n_event_connection_info,
         ) -> *mut s2n_event_connection_publisher {
-            let (meta, info, subscriber) = unsafe {
-                (
-                    meta.into_event(),
-                    info.into_event(),
-                    &mut *((*event_subscriber).subscriber as *mut S),
-                )
+            let meta = meta_ptr.into_event();
+            let info = info_ptr.into_event();
+            let subscriber = {
+                let event_subscriber = s2n_event_subscriber::from_ptr(s2n_event_subscriber_ptr);
+                event_subscriber.subscriber::<S>()
             };
             let mut context = subscriber
                 .create_connection_context(&meta.clone().into_event(), &info.clone().into_event());
-            let publisher_subscriber_ptr = Box::into_raw(Box::new(
+            let connection_publisher_subscriber_ptr = Box::into_raw(Box::new(
                 ConnectionPublisherSubscriber::new(meta, 0, subscriber, &mut context),
             )) as *mut c_void;
-            let context_ptr = Box::into_raw(Box::new(context)) as *mut c_void;
+            let connection_context_ptr = Box::into_raw(Box::new(context)) as *mut c_void;
             Box::into_raw(Box::new(s2n_event_connection_publisher {
-                connection_publisher_subscriber: publisher_subscriber_ptr,
-                connection_context: context_ptr,
+                connection_publisher_subscriber_ptr,
+                connection_context_ptr,
                 on_byte_array_event: |publisher, event| {
-                    let publisher = unsafe {
-                        &mut *((*publisher).connection_publisher_subscriber
-                            as *mut ConnectionPublisherSubscriber<S>)
-                    };
+                    let publisher = unsafe { (*publisher).connection_publisher_subscriber::<S>() };
                     publisher.on_byte_array_event(event.into_event());
                 },
             }))

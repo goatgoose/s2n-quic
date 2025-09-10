@@ -432,14 +432,16 @@ impl Struct {
 
                         output.c_ffi_publisher_event_trigger_definitions.extend(quote!(
                             #function: fn(
-                            connection_publisher: *mut s2n_event_connection_publisher,
-                            event: *const #c_arg_struct_name,
+                            s2n_event_connection_publisher_ptr: *mut s2n_event_connection_publisher,
+                            event_ptr: *const #c_arg_struct_name,
                             ),
                         ));
 
                         output.c_ffi_publisher_event_trigger_inits.extend(quote!(
                             #function: |publisher, event| {
-                                let publisher = unsafe { &mut *((*publisher).connection_publisher_subscriber as *mut ConnectionPublisherSubscriber<S>) };
+                                let publisher = unsafe {
+                                    (*publisher).connection_publisher_subscriber::<S>()
+                                };
                                 publisher.#function(event.into_event());
                             },
                         ));
