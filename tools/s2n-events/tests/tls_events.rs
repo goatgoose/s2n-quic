@@ -106,7 +106,10 @@ fn publish_byte_array_event_with_c_ffi() {
             data_len: 3,
         };
         c_ffi::s2n_connection_publisher_on_byte_array_event(publisher, &event);
-    }
 
-    assert_eq!(subscriber.received_data.lock().unwrap().take().unwrap(), vec![2, 3, 4]);
+        assert_eq!(subscriber.received_data.lock().unwrap().take().unwrap(), vec![2, 3, 4]);
+
+        c_ffi::s2n_event_connection_publisher_free(publisher);
+        c_ffi::s2n_event_subscriber_free(c_subscriber);
+    }
 }

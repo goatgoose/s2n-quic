@@ -563,6 +563,7 @@ pub mod c_ffi {
             meta_ptr: *const s2n_event_connection_meta,
             info_ptr: *const s2n_event_connection_info,
         ) -> *mut s2n_event_connection_publisher,
+        free: fn(s2n_event_subscriber_ptr: *mut s2n_event_subscriber) -> c_int,
     }
     impl s2n_event_subscriber {
         fn from_ptr<'a>(s2n_event_subscriber_ptr: *mut s2n_event_subscriber) -> &'a mut Self {
@@ -572,18 +573,35 @@ pub mod c_ffi {
             let subscriber = self.subscriber_ptr as *mut S;
             unsafe { &mut *subscriber }
         }
+        fn free<S: Subscriber>(s2n_event_subscriber_ptr: *mut s2n_event_subscriber) -> c_int {
+            unsafe {
+                let subscriber_box = Box::from_raw(s2n_event_subscriber_ptr);
+                let _ = Box::from_raw(subscriber_box.subscriber_ptr as *mut S);
+            }
+            0
+        }
         pub fn new<S: Subscriber>(subscriber: S) -> *mut Self {
             let subscriber_ptr = Box::into_raw(Box::new(subscriber)) as *mut c_void;
             Box::into_raw(Box::new(s2n_event_subscriber {
                 subscriber_ptr,
                 connection_publisher_new: s2n_event_connection_publisher::new::<S>,
+                free: s2n_event_subscriber::free::<S>,
             }))
         }
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn s2n_event_subscriber_free(
+        subscriber: *mut s2n_event_subscriber,
+    ) -> c_int {
+        let subscriber_ref = &*subscriber;
+        (subscriber_ref.free)(subscriber);
+        0
     }
     #[allow(non_camel_case_types)]
     pub struct s2n_event_connection_publisher {
         connection_publisher_subscriber_ptr: *mut c_void,
-        _connection_context_ptr: *mut c_void,
+        connection_context_ptr: *mut c_void,
+        free: fn(s2n_event_connection_publisher_ptr: *mut s2n_event_connection_publisher) -> c_int,
         on_byte_array_event: fn(
             s2n_event_connection_publisher_ptr: *mut s2n_event_connection_publisher,
             event_ptr: *const s2n_event_byte_array,
@@ -592,10 +610,25 @@ pub mod c_ffi {
     impl s2n_event_connection_publisher {
         fn connection_publisher_subscriber<S: Subscriber>(
             &self,
-        ) -> &mut ConnectionPublisherSubscriber<S> {
+        ) -> &mut ConnectionPublisherSubscriber<'_, S> {
             let publisher = self.connection_publisher_subscriber_ptr;
             let publisher = publisher as *mut ConnectionPublisherSubscriber<S>;
             unsafe { &mut *publisher }
+        }
+        fn free<S: Subscriber>(
+            s2n_event_connection_publisher_ptr: *mut s2n_event_connection_publisher,
+        ) -> c_int {
+            unsafe {
+                let publisher_box = Box::from_raw(s2n_event_connection_publisher_ptr);
+                let _ = Box::from_raw(
+                    publisher_box.connection_context_ptr as *mut S::ConnectionContext,
+                );
+                let _ = Box::from_raw(
+                    publisher_box.connection_publisher_subscriber_ptr
+                        as *mut ConnectionPublisherSubscriber<S>,
+                );
+            }
+            0
         }
         fn new<S: Subscriber>(
             s2n_event_subscriber_ptr: *mut s2n_event_subscriber,
@@ -625,7 +658,8 @@ pub mod c_ffi {
             };
             Box::into_raw(Box::new(s2n_event_connection_publisher {
                 connection_publisher_subscriber_ptr,
-                _connection_context_ptr: connection_context_ptr,
+                connection_context_ptr,
+                free: s2n_event_connection_publisher::free::<S>,
                 on_byte_array_event: |publisher, event| {
                     let publisher = unsafe { (*publisher).connection_publisher_subscriber::<S>() };
                     publisher.on_byte_array_event(event.into_event());
@@ -641,6 +675,13 @@ pub mod c_ffi {
     ) -> *mut s2n_event_connection_publisher {
         let subscriber_ref = &*subscriber;
         (subscriber_ref.connection_publisher_new)(subscriber, meta, info)
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn s2n_event_connection_publisher_free(
+        publisher: *mut s2n_event_connection_publisher,
+    ) -> c_int {
+        let publisher_ref = &*publisher;
+        (publisher_ref.free)(publisher)
     }
     #[repr(C)]
     #[allow(non_camel_case_types)]
