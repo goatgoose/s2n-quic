@@ -4,7 +4,7 @@
 use crate::{Output, PublisherTarget, Result};
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::{quote, ToTokens};
+use quote::{format_ident, quote, ToTokens};
 use std::path::PathBuf;
 use syn::{parse::{Parse, ParseStream}, Meta, Token};
 
@@ -445,9 +445,21 @@ impl Struct {
                                 publisher.#function(event.into_event());
                             },
                         ));
-                        
+
+                        let c_function = format_ident!(
+                            "s2n_connection_publisher_{}",
+                            function
+                        );
                         output.c_ffi_content.extend(quote!(
-                            
+                            #[unsafe(no_mangle)]
+                            pub unsafe extern "C" fn #c_function(
+                                publisher: *mut s2n_event_connection_publisher,
+                                event: *const #c_arg_struct_name,
+                            ) -> c_int {
+                                let publisher_ref = &*publisher;
+                                (publisher_ref.#function)(publisher, event);
+                                0
+                            }
                         ))
                     }
                 }

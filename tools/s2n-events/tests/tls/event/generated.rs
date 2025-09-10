@@ -572,7 +572,7 @@ pub mod c_ffi {
             let subscriber = self.subscriber_ptr as *mut S;
             unsafe { &mut *subscriber }
         }
-        pub fn new<S: Subscriber>(subscriber: S) -> *mut Self {
+        pub fn new<S: Subscriber>(mut subscriber: S) -> *mut Self {
             let subscriber_ptr = Box::into_raw(Box::new(subscriber)) as *mut c_void;
             Box::into_raw(Box::new(s2n_event_subscriber {
                 subscriber_ptr,
@@ -608,12 +608,21 @@ pub mod c_ffi {
                 let event_subscriber = s2n_event_subscriber::from_ptr(s2n_event_subscriber_ptr);
                 event_subscriber.subscriber::<S>()
             };
-            let mut context = subscriber
-                .create_connection_context(&meta.clone().into_event(), &info.clone().into_event());
-            let connection_publisher_subscriber_ptr = Box::into_raw(Box::new(
-                ConnectionPublisherSubscriber::new(meta, 0, subscriber, &mut context),
-            )) as *mut c_void;
-            let connection_context_ptr = Box::into_raw(Box::new(context)) as *mut c_void;
+            let connection_context_ptr =
+                Box::into_raw(Box::new(subscriber.create_connection_context(
+                    &meta.clone().into_event(),
+                    &info.clone().into_event(),
+                ))) as *mut c_void;
+            let connection_publisher_subscriber_ptr = {
+                let context_ref =
+                    unsafe { &mut *(connection_context_ptr as *mut S::ConnectionContext) };
+                Box::into_raw(Box::new(ConnectionPublisherSubscriber::new(
+                    meta,
+                    0,
+                    subscriber,
+                    context_ref,
+                ))) as *mut c_void
+            };
             Box::into_raw(Box::new(s2n_event_connection_publisher {
                 connection_publisher_subscriber_ptr,
                 connection_context_ptr,
@@ -623,6 +632,15 @@ pub mod c_ffi {
                 },
             }))
         }
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn s2n_event_connection_publisher_new(
+        subscriber: *mut s2n_event_subscriber,
+        meta: *const s2n_event_connection_meta,
+        info: *const s2n_event_connection_info,
+    ) -> *mut s2n_event_connection_publisher {
+        let subscriber_ref = &*subscriber;
+        (subscriber_ref.connection_publisher_new)(subscriber, meta, info)
     }
     #[repr(C)]
     #[allow(non_camel_case_types)]
@@ -638,6 +656,15 @@ pub mod c_ffi {
     pub struct s2n_event_byte_array {
         pub data: *mut u8,
         pub data_len: u32,
+    }
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn s2n_connection_publisher_on_byte_array_event(
+        publisher: *mut s2n_event_connection_publisher,
+        event: *const s2n_event_byte_array,
+    ) -> c_int {
+        let publisher_ref = &*publisher;
+        (publisher_ref.on_byte_array_event)(publisher, event);
+        0
     }
 }
 #[cfg(any(test, feature = "testing"))]

@@ -415,19 +415,20 @@ impl OutputConfig {
                             event_subscriber.subscriber::<S>()
                         };
 
-                        let mut context = subscriber.create_connection_context(
+                        let connection_context_ptr = Box::into_raw(Box::new(subscriber.create_connection_context(
                             &meta.clone().into_event(),
                             &info.clone().into_event()
-                        );
-
-                        let connection_publisher_subscriber_ptr = Box::into_raw(Box::new(ConnectionPublisherSubscriber::new(
-                            meta,
-                            0,
-                            subscriber,
-                            &mut context
                         ))) as *mut c_void;
-
-                        let connection_context_ptr = Box::into_raw(Box::new(context)) as *mut c_void;
+                        
+                        let connection_publisher_subscriber_ptr = {
+                            let context_ref = unsafe { &mut *(connection_context_ptr as *mut S::ConnectionContext) };
+                            Box::into_raw(Box::new(ConnectionPublisherSubscriber::new(
+                                meta,
+                                0,
+                                subscriber,
+                                context_ref
+                            ))) as *mut c_void
+                        };
 
                         Box::into_raw(Box::new(s2n_event_connection_publisher {
                             connection_publisher_subscriber_ptr,
@@ -435,6 +436,16 @@ impl OutputConfig {
                             #c_ffi_publisher_event_trigger_inits
                         }))
                     }
+                }
+
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn s2n_event_connection_publisher_new(
+                    subscriber: *mut s2n_event_subscriber,
+                    meta: *const s2n_event_connection_meta,
+                    info: *const s2n_event_connection_info,
+                ) -> *mut s2n_event_connection_publisher {
+                    let subscriber_ref = &*subscriber;
+                    (subscriber_ref.connection_publisher_new)(subscriber, meta, info)
                 }
 
                 #c_ffi_content
