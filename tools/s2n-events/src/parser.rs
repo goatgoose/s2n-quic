@@ -131,6 +131,12 @@ impl Struct {
             return;
         }
 
+        if attrs.builder_derive {
+            output.builders.extend(quote!(
+                #[#builder_derive_attrs]
+            ));
+        }
+
         output.builders.extend(quote!(
             #[derive(Clone, Debug)]
             #extra_attrs
@@ -138,12 +144,6 @@ impl Struct {
                 #(#builder_fields)*
             }
         ));
-
-        if attrs.builder_derive {
-            output.builders.extend(quote!(
-                #[#builder_derive_attrs]
-            ));
-        }
 
         output.builders.extend(quote!(
             #allow_deprecated
@@ -447,7 +447,7 @@ impl Struct {
                         ));
 
                         let c_function = format_ident!(
-                            "s2n_connection_publisher_{}",
+                            "s2n_event_connection_publisher_{}",
                             function
                         );
                         output.c_ffi_content.extend(quote!(

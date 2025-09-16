@@ -699,7 +699,7 @@ pub mod c_ffi {
         pub data_len: u32,
     }
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn s2n_connection_publisher_on_byte_array_event(
+    pub unsafe extern "C" fn s2n_event_connection_publisher_on_byte_array_event(
         publisher: *mut s2n_event_connection_publisher,
         event: *const s2n_event_byte_array,
     ) -> c_int {
