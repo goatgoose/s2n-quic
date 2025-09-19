@@ -36,6 +36,7 @@ pub struct Output {
     pub s2n_quic_core_path: TokenStream,
     pub top_level: TokenStream,
     pub feature_alloc: TokenStream,
+    pub c_ffi: TokenStream,
     pub root: PathBuf,
 }
 
@@ -115,6 +116,7 @@ impl ToTokens for Output {
             top_level,
             feature_alloc: _,
             crate_name,
+            c_ffi,
             root: _,
         } = self;
 
@@ -129,6 +131,7 @@ impl ToTokens for Output {
         let query_mut = self.config.query_mut();
         let query_mut_tuple = self.config.query_mut_tuple();
         let trait_constraints = self.config.trait_constraints();
+        let c_ffi = self.config.c_ffi(c_ffi);
 
         let ref_subscriber = self.config.ref_subscriber(quote!(
             type ConnectionContext = T::ConnectionContext;
@@ -461,6 +464,8 @@ impl ToTokens for Output {
                     }
                 }
             }
+
+            #c_ffi
 
             #[cfg(any(test, feature = "testing"))]
             pub mod testing {

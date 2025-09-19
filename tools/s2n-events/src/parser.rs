@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Output, Result};
+use crate::{Output, OutputCApi, Result};
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens};
@@ -97,6 +97,33 @@ impl Struct {
     }
 
     fn to_tokens(&self, output: &mut Output) {
+        match self.attrs.c_definition {
+            true => self.to_tokens_c_definition(output),
+            false => self.to_tokens_rust_definition(output),
+        }
+    }
+
+    fn to_tokens_c_definition(&self, output: &mut Output) {
+        assert!(
+            self.attrs.event_name.is_none(),
+            "C struct definitions cannot be directly used as events."
+        );
+
+        let ident = &self.ident;
+        let extra_attrs = &self.attrs.extra;
+        let c_definition_attrs = &self.attrs.c_definition_attrs;
+        let builder_fields = self.fields.iter().map(Field::builder);
+
+        output.c_ffi.extend(quote!(
+            #c_definition_attrs
+            #extra_attrs
+            pub struct #ident {
+                #(#builder_fields)*
+            }
+        ));
+    }
+
+    fn to_tokens_rust_definition(&self, output: &mut Output) {
         let Self {
             attrs,
             ident,
@@ -405,6 +432,14 @@ impl Struct {
                             }
                         }
                     ));
+
+                    if let OutputCApi::Enabled = output.config.c_api {
+                        assert!(
+                            attrs.associated_c_argument.is_some(),
+                            "Events must define an associated argument for the C API with the \
+                            #[c_argument()] attribute."
+                        )
+                    }
                 }
             }
         }
@@ -432,17 +467,42 @@ impl Enum {
     }
 
     fn to_tokens(&self, output: &mut Output) {
+        assert!(
+            self.attrs.event_name.is_none(),
+            "enum events are not currently supported"
+        );
+
+        match self.attrs.c_definition {
+            true => self.to_tokens_c_definition(output),
+            false => self.to_tokens_rust_definition(output),
+        }
+    }
+
+    fn to_tokens_c_definition(&self, output: &mut Output) {
+        let ident = &self.ident;
+
+        let extra_attrs = &self.attrs.extra;
+        let c_definition_attrs = &self.attrs.c_definition_attrs;
+
+        let builder_fields = self.variants.iter().map(Variant::builder);
+
+        output.c_ffi.extend(quote!(
+            #c_definition_attrs
+            #[derive(Clone, Debug)]
+            #extra_attrs
+            pub enum #ident {
+                #(#builder_fields)*
+            }
+        ));
+    }
+
+    fn to_tokens_rust_definition(&self, output: &mut Output) {
         let Self {
             attrs,
             ident,
             generics,
             variants,
         } = self;
-
-        assert!(
-            attrs.event_name.is_none(),
-            "enum events are not currently supported"
-        );
 
         let derive_attrs = &attrs.derive_attrs;
         let builder_derive_attrs = &attrs.builder_derive_attrs;
@@ -543,6 +603,9 @@ pub struct ContainerAttrs {
     pub checkpoint: Vec<Checkpoint>,
     pub measure_counter: Vec<Metric>,
     pub extra: TokenStream,
+    pub associated_c_argument: Option<TokenStream>,
+    pub c_definition: bool,
+    pub c_definition_attrs: TokenStream,
 }
 
 impl ContainerAttrs {
@@ -563,6 +626,9 @@ impl ContainerAttrs {
             checkpoint: vec![],
             measure_counter: vec![],
             extra: quote!(),
+            associated_c_argument: None,
+            c_definition: false,
+            c_definition_attrs: TokenStream::default(),
         };
 
         for attr in attrs {
@@ -591,6 +657,13 @@ impl ContainerAttrs {
                 v.checkpoint.push(attr.parse_args().unwrap());
             } else if path.is_ident("measure_counter") {
                 v.measure_counter.push(attr.parse_args().unwrap());
+            } else if path.is_ident("c_argument") {
+                v.associated_c_argument = Some(attr.parse_args().unwrap());
+            } else if path.is_ident("repr") {
+                // Structs/enums with the #[repr(...)] attribute are assumed to be defined for the
+                // C API.
+                v.c_definition = true;
+                attr.to_tokens(&mut v.c_definition_attrs);
             } else {
                 attr.to_tokens(&mut v.extra)
             }

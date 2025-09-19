@@ -340,6 +340,21 @@ impl GenerateConfig {
             OutputMode::Mut => quote!(),
         }
     }
+
+    pub fn c_ffi(&self, inner: &TokenStream) -> TokenStream {
+        if let OutputCApi::Disabled = self.c_api {
+            return quote!();
+        }
+
+        quote!(
+            pub mod c_ffi {
+                #[allow(unused_imports)]
+                use std::ffi::*;
+
+                #inner
+            }
+        )
+    }
 }
 
 impl ToTokens for OutputMode {

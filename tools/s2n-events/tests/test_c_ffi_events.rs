@@ -53,3 +53,46 @@ fn publish_byte_array_event() {
 
     assert_eq!(subscriber.received_data, vec![1, 2, 3]);
 }
+
+#[test]
+fn convert_byte_array_event() {
+    let data: Vec<u8> = vec![4, 5, 6];
+    let len = data.len();
+    let event: *const event::c_ffi::s2n_byte_array_event = &event::c_ffi::s2n_byte_array_event {
+        data: data.as_ptr(),
+        len: len as u32,
+    };
+
+    let converted = event.into_event();
+
+    assert_eq!(converted.data, data.as_slice());
+}
+
+#[test]
+fn convert_enum_event() {
+    struct TestCase {
+        value: event::c_ffi::s2n_test_enum,
+        expected_value: event::builder::TestEnum,
+    }
+
+    let test_cases = [
+        TestCase {
+            value: event::c_ffi::s2n_test_enum::S2N_TEST_VALUE_1,
+            expected_value: event::builder::TestEnum::TestValue1,
+        },
+        TestCase {
+            value: event::c_ffi::s2n_test_enum::S2N_TEST_VALUE_2,
+            expected_value: event::builder::TestEnum::TestValue2,
+        }
+    ];
+
+    for test in test_cases {
+        let event: *const event::c_ffi::s2n_enum_event = &event::c_ffi::s2n_enum_event {
+            value: test.value,
+        };
+
+        let converted = event.into_event();
+
+        assert_eq!(converted.value, test.expected_value);
+    }
+}

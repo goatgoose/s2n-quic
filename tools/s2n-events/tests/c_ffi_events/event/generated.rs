@@ -155,6 +155,34 @@ pub mod api {
     impl Event for CountEvent {
         const NAME: &'static str = "count_event";
     }
+    impl<'a> IntoEvent<builder::ByteArrayEvent<'a>> for *const c_ffi::s2n_byte_array_event {
+        fn into_event(self) -> builder::ByteArrayEvent<'a> {
+            unsafe {
+                let event = &*self;
+                let data = std::slice::from_raw_parts(event.data, event.len.try_into().unwrap());
+                builder::ByteArrayEvent { data }
+            }
+        }
+    }
+    impl IntoEvent<builder::TestEnum> for c_ffi::s2n_test_enum {
+        fn into_event(self) -> builder::TestEnum {
+            match self {
+                Self::S2N_TEST_VALUE_1 => builder::TestEnum::TestValue1,
+                Self::S2N_TEST_VALUE_2 => builder::TestEnum::TestValue2,
+            }
+        }
+    }
+    impl IntoEvent<builder::EnumEvent> for *const c_ffi::s2n_enum_event {
+        fn into_event(self) -> builder::EnumEvent {
+            unsafe {
+                let event = &*self;
+                let value = event.value.clone();
+                builder::EnumEvent {
+                    value: value.into_event(),
+                }
+            }
+        }
+    }
 }
 pub mod tracing {
     #![doc = r" This module contains event integration with [`tracing`](https://docs.rs/tracing)"]
@@ -293,7 +321,7 @@ pub mod builder {
             }
         }
     }
-    #[derive(Clone, Debug)]
+    #[derive(PartialEq, Clone, Debug)]
     pub enum TestEnum {
         TestValue1,
         TestValue2,
@@ -636,6 +664,28 @@ mod traits {
         fn subject(&self) -> api::Subject {
             self.meta.subject()
         }
+    }
+}
+pub mod c_ffi {
+    #[allow(unused_imports)]
+    use std::ffi::*;
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    pub struct s2n_byte_array_event {
+        pub data: *const u8,
+        pub len: u32,
+    }
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    pub struct s2n_enum_event {
+        pub value: s2n_test_enum,
+    }
+    #[repr(C)]
+    #[derive(Clone, Debug)]
+    #[allow(non_camel_case_types)]
+    pub enum s2n_test_enum {
+        S2N_TEST_VALUE_1,
+        S2N_TEST_VALUE_2,
     }
 }
 #[cfg(any(test, feature = "testing"))]
